@@ -36,7 +36,7 @@ class AddonSourceRepository(
 
         return supervisorScope {
             candidates.map { addon ->
-                async {
+                async<AddonResult<List<AddonSource>>> {
                     when (val response = client.fetchJson(addon.baseUrl, listOf("stream", item.type, "${item.id}.json"))) {
                         is AddonResult.Failure -> response
                         is AddonResult.Success -> {
