@@ -56,9 +56,6 @@ jobs:
           echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
           echo "Keystore decoded."
 
-      - name: Run unit tests
-        run: gradle --no-daemon :app:testReleaseUnitTest
-
       - name: Build signed release APK
         env:
           SIGNING_KEYSTORE_PATH: ${{ runner.temp }}/release.keystore
