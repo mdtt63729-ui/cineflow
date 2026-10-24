@@ -10,6 +10,13 @@ plugins {
 // the project still configures and builds.
 val signingKeystorePath: String? = System.getenv("SIGNING_KEYSTORE_PATH")
 
+// Version bumping: the release workflow exports VERSION_CODE and VERSION_NAME
+// (derived from the workflow run number) so every build gets a strictly newer,
+// installable version. Local builds fall back to the committed defaults.
+val buildVersionCode: Int = System.getenv("VERSION_CODE")?.trim()?.toIntOrNull() ?: 1
+val buildVersionName: String =
+    System.getenv("VERSION_NAME")?.trim()?.takeIf { it.isNotEmpty() } ?: "1.0.0"
+
 android {
     namespace = "com.gtx.cineflow"
     compileSdk = 35
@@ -18,8 +25,8 @@ android {
         applicationId = "com.gtx.cineflow"
         minSdk = 24
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = buildVersionCode
+        versionName = buildVersionName
     }
 
     signingConfigs {
