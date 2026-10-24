@@ -6,8 +6,8 @@ plugins {
 
 // Release signing is driven entirely by environment variables that the CI
 // workflow populates from the repository's Actions secrets. When they are not
-// present (e.g. a local debug build) the release variant is simply left
-// unsigned so the project still configures and builds.
+// present (e.g. a local debug build) the release variant is left unsigned so
+// the project still configures and builds.
 val signingKeystorePath: String? = System.getenv("SIGNING_KEYSTORE_PATH")
 
 android {
@@ -83,7 +83,8 @@ dependencies {
     implementation("com.squareup.retrofit2:converter-gson:2.11.0")
     implementation("com.google.code.gson:gson:2.11.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
-    implementation("androidx.datastore:datastore-preferences:1.1.2")
+    implementation("androidx.datastore:datastore-preferences:1.1.1")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 
     implementation("androidx.media3:media3-exoplayer:1.5.1")
     implementation("androidx.media3:media3-ui:1.5.1")

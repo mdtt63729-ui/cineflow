@@ -92,3 +92,24 @@ The full-screen Media3 player uses the standard controller, buffering indicator,
 ## Trakt public catalogue integration (Phase 7 foundation)
 
 OAuth has been removed. `TraktApi.kt` now contains public catalogue endpoints for trending/popular movies and shows plus movie/show search. Configure your own Trakt Client ID in the request header. This does not access a user account and cannot read or sync private watch history, personal watchlists, or scrobble to a user profile. The adapter is not yet wired into the Settings/Home/Search UI and has not been live-tested. See `docs/INTEGRATION_STATUS.md` for limitations.
+
+
+## Addon engine upgrade (P1–P5 source bundle)
+
+This upgraded project merges the existing CineFlowAndroid project and additive P1–P5 addon-engine sources. P1 provides addon persistence/client/dispatch, P2 catalog/search UI components, P3 detail/source models, P4 ranking/direct Media3 playback, and P5 loopback HTTP Range streaming primitives.
+
+**Integration status:** these are additive components; `MainActivity.kt` navigation has not been rewritten to wire the new addon screens. P5 includes the Range server and backend interface but not a concrete native libtorrent4j adapter. Therefore this is not yet a complete magnet-to-playback torrent feature. Android compilation and unit tests have not been run in this environment. The GitHub Actions workflow is configured to run unit tests before assembling the debug APK.
+
+
+## P6 — Subtitles and downloads
+P6 adds SRT/WebVTT parsing, HTTPS subtitle fetching, a subtitle selection UI and chunked direct downloads. Android 10+ uses public Downloads/CineFlow; Android 7–9 uses app-specific Downloads. These are additive components, not wired into existing playback/navigation. Build and tests are not yet verified.
+
+## Phase 7: Real-Debrid
+See `docs/PHASE_7_REAL_DEBRID.md` for secure token storage, account check, and authorized direct-link handling. This is an additive integration component; existing app navigation/player wiring remains a separate integration step.
+
+## Phase 7: Real-Debrid
+See `docs/PHASE_7_REAL_DEBRID.md` for secure token storage, account check, and authorized direct-link handling. This is an additive integration component; existing app navigation/player wiring remains a separate integration step.
+
+## Phase 8 — Cloudstream `.cs3` compatibility boundary
+
+P8 adds a **safe, non-executing `.cs3` archive metadata inspector** and a reusable Material 3 preview panel. It reads bounded `metadata.json` / `plugin.json` metadata and rejects archives containing executable bytecode or native binaries. It does **not** run Cloudstream plugins or provide full Cloudstream runtime compatibility. The UI component is additive and is not yet wired into `MainActivity`; see `docs/PHASE_8_CLOUDSTREAM_COMPATIBILITY.md`.
