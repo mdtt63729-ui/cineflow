@@ -20,8 +20,10 @@ import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -47,6 +49,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -73,13 +76,33 @@ import retrofit2.http.Path
 import retrofit2.http.Query
 import java.net.URI
 
-// MovieBox-style dark palette: near-black surfaces with a green accent.
-private val Ink = Color(0xFF070A0F)
-private val Panel = Color(0xFF121821)
-private val Panel2 = Color(0xFF1C2530)
-private val Peach = Color(0xFF00E08F)
-private val Cream = Color(0xFFF3F6F8)
-private val Muted = Color(0xFF93A1AE)
+// Theme palette. Dark is the MovieBox-style default; Light mirrors it for bright rooms.
+private class AppPalette(
+    val ink: Color, val panel: Color, val panel2: Color,
+    val accent: Color, val onAccent: Color, val cream: Color, val muted: Color
+)
+
+private val DarkPalette = AppPalette(
+    ink = Color(0xFF070A0F), panel = Color(0xFF121821), panel2 = Color(0xFF1C2530),
+    accent = Color(0xFF00E08F), onAccent = Color(0xFF04120C),
+    cream = Color(0xFFF3F6F8), muted = Color(0xFF93A1AE)
+)
+
+private val LightPalette = AppPalette(
+    ink = Color(0xFFF4F6F9), panel = Color(0xFFFFFFFF), panel2 = Color(0xFFE5EAF0),
+    accent = Color(0xFF00A86B), onAccent = Color(0xFFFFFFFF),
+    cream = Color(0xFF0C1420), muted = Color(0xFF5B6675)
+)
+
+private val appPalette = mutableStateOf(DarkPalette)
+
+private val Ink: Color get() = appPalette.value.ink
+private val Panel: Color get() = appPalette.value.panel
+private val Panel2: Color get() = appPalette.value.panel2
+private val Peach: Color get() = appPalette.value.accent
+private val OnAccent: Color get() = appPalette.value.onAccent
+private val Cream: Color get() = appPalette.value.cream
+private val Muted: Color get() = appPalette.value.muted
 private const val SAMPLE_STREAM = "https://storage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
 
 data class Movie(
@@ -162,6 +185,21 @@ fun CineFlowApp() {
     val homeListState = rememberLazyListState()
     val libraryListState = rememberLazyListState()
     val prefs = remember { context.getSharedPreferences("cineflow", Context.MODE_PRIVATE) }
+    var themeMode by remember { mutableStateOf(prefs.getString("theme_mode", "dark") ?: "dark") }
+    val systemDark = isSystemInDarkTheme()
+    val effectiveDark = when (themeMode) {
+        "light" -> false
+        "dark" -> true
+        else -> systemDark
+    }
+    appPalette.value = if (effectiveDark) DarkPalette else LightPalette
+    val activity = context as? ComponentActivity
+    LaunchedEffect(effectiveDark) {
+        val bg = if (effectiveDark) android.graphics.Color.rgb(7, 10, 15) else android.graphics.Color.rgb(244, 246, 249)
+        val window = activity?.window ?: return@LaunchedEffect
+        window.statusBarColor = bg
+        window.navigationBarColor = bg
+    }
     var apiRevision by remember { mutableIntStateOf(0) }
     val api = remember(apiRevision) { makeApi(context) }
     var sections by remember { mutableStateOf(sampleSections()) }
@@ -350,7 +388,7 @@ fun CineFlowApp() {
 
     MaterialTheme(
         colorScheme = darkColorScheme(
-            primary = Peach, onPrimary = Ink, background = Ink, onBackground = Cream,
+            primary = Peach, onPrimary = OnAccent, background = Ink, onBackground = Cream,
             surface = Panel, onSurface = Cream, surfaceVariant = Panel2, onSurfaceVariant = Muted
         )
     ) {
@@ -458,6 +496,11 @@ fun CineFlowApp() {
                         onBannerAutoSlideChange = { checked ->
                             bannerAutoSlide = checked
                             prefs.edit().putBoolean("banner_auto_slide", checked).apply()
+                        },
+                        themeMode = themeMode,
+                        onThemeModeChange = { mode ->
+                            themeMode = mode
+                            prefs.edit().putString("theme_mode", mode).apply()
                         },
                         onSave = { value, key, jfServer, jfUser, jfToken, jfUserId ->
                             apiBase = value.trim()
@@ -617,9 +660,11 @@ fun HomeScreen(
                 Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 20.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Box(Modifier.size(34.dp).clip(RoundedCornerShape(11.dp)).background(Peach), contentAlignment = Alignment.Center) {
-                    Icon(Icons.Default.PlayArrow, null, tint = Ink, modifier = Modifier.size(26.dp))
-                }
+                Image(
+                    painter = painterResource(com.gtx.cineflow.R.drawable.app_logo),
+                    contentDescription = "CineFlow",
+                    modifier = Modifier.size(36.dp).clip(RoundedCornerShape(11.dp))
+                )
                 Spacer(Modifier.width(10.dp))
                 Text("CineFlow", fontSize = 24.sp, fontWeight = FontWeight.ExtraBold, color = Cream)
                 Spacer(Modifier.weight(1f))
@@ -752,13 +797,13 @@ fun HeroBanner(movie: Movie, onOpen: (Movie) -> Unit, onPlay: (Movie) -> Unit) {
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Surface(color = Peach, shape = RoundedCornerShape(50)) {
-                Text("FEATURED", Modifier.padding(horizontal = 11.dp, vertical = 5.dp), color = Ink, fontSize = 10.sp, fontWeight = FontWeight.Black, letterSpacing = 1.2.sp)
+                Text("FEATURED", Modifier.padding(horizontal = 11.dp, vertical = 5.dp), color = OnAccent, fontSize = 10.sp, fontWeight = FontWeight.Black, letterSpacing = 1.2.sp)
             }
             Text(movie.title, fontSize = 34.sp, lineHeight = 37.sp, fontWeight = FontWeight.ExtraBold, color = Cream, maxLines = 2, overflow = TextOverflow.Ellipsis)
             Text("${movie.year}  •  ★ ${movie.rating}  •  ${movie.kind}", color = Cream.copy(alpha = .82f), fontSize = 13.sp)
             Text(movie.overview, color = Cream.copy(alpha = .85f), maxLines = 2, overflow = TextOverflow.Ellipsis, fontSize = 13.sp, lineHeight = 18.sp)
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(onClick = { onPlay(movie) }, colors = ButtonDefaults.buttonColors(containerColor = Peach, contentColor = Ink), shape = RoundedCornerShape(13.dp)) {
+                Button(onClick = { onPlay(movie) }, colors = ButtonDefaults.buttonColors(containerColor = Peach, contentColor = OnAccent), shape = RoundedCornerShape(13.dp)) {
                     Icon(Icons.Default.PlayArrow, null); Spacer(Modifier.width(4.dp)); Text("Play", fontWeight = FontWeight.Bold)
                 }
                 OutlinedButton(onClick = { onOpen(movie) }, shape = RoundedCornerShape(13.dp), colors = ButtonDefaults.outlinedButtonColors(contentColor = Cream)) {
@@ -885,7 +930,7 @@ fun DetailScreen(movie: Movie, canPlay: Boolean, saved: Boolean, onBack: () -> U
                 Text(movie.title, color = Cream, fontSize = 29.sp, fontWeight = FontWeight.ExtraBold, lineHeight = 33.sp)
                 Text("${movie.year}  •  ${movie.kind}  •  ★ ${movie.rating}", color = Peach, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Button(onClick = onPlay, enabled = canPlay, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Peach, contentColor = Ink, disabledContainerColor = Panel2, disabledContentColor = Muted), shape = RoundedCornerShape(13.dp)) {
+                    Button(onClick = onPlay, enabled = canPlay, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Peach, contentColor = OnAccent, disabledContainerColor = Panel2, disabledContentColor = Muted), shape = RoundedCornerShape(13.dp)) {
                         Icon(if (canPlay) Icons.Default.PlayArrow else Icons.Default.Info, null); Spacer(Modifier.width(5.dp)); Text(if (canPlay) "Watch now" else "Metadata only")
                     }
                     OutlinedButton(onClick = onToggleSaved, shape = RoundedCornerShape(13.dp), colors = ButtonDefaults.outlinedButtonColors(contentColor = Cream)) {
@@ -917,6 +962,7 @@ fun SettingsScreen(
     addonSummary: String, addonCards: List<AddonCard>, addonBusy: Boolean,
     onInstallAddon: (String) -> Unit, onDeleteAddon: (String) -> Unit, onRetryAddons: () -> Unit,
     bannerAutoSlide: Boolean, onBannerAutoSlideChange: (Boolean) -> Unit,
+    themeMode: String, onThemeModeChange: (String) -> Unit,
     onSave: (String, String, String, String, String, String) -> Unit
 ) {
     var addonUrl by remember { mutableStateOf("") }
@@ -963,7 +1009,7 @@ fun SettingsScreen(
                 Button(
                     onClick = { onInstallAddon(addonUrl.trim()) },
                     enabled = addonUrl.isNotBlank() && !addonBusy,
-                    colors = ButtonDefaults.buttonColors(containerColor = Peach, contentColor = Ink),
+                    colors = ButtonDefaults.buttonColors(containerColor = Peach, contentColor = OnAccent),
                     shape = RoundedCornerShape(14.dp)
                 ) { Text("Install") }
             }
@@ -983,7 +1029,7 @@ fun SettingsScreen(
                             color = when (card.status) { "Installed" -> Peach; "Not installable" -> Color(0xFFE5484D); else -> Panel2 },
                             shape = RoundedCornerShape(50)
                         ) {
-                            Text(card.status, Modifier.padding(horizontal = 9.dp, vertical = 3.dp), color = if (card.status == "Installed") Ink else Cream, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            Text(card.status, Modifier.padding(horizontal = 9.dp, vertical = 3.dp), color = if (card.status == "Installed") OnAccent else Cream, fontSize = 10.sp, fontWeight = FontWeight.Bold)
                         }
                     }
                     Text(card.purpose, color = Muted, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
@@ -992,7 +1038,7 @@ fun SettingsScreen(
                         if (card.status == "Installed") {
                             OutlinedButton(onClick = { onDeleteAddon(card.url) }, enabled = !addonBusy, shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFFF6B6B))) { Text("Delete", fontSize = 12.sp) }
                         } else {
-                            Button(onClick = { onInstallAddon(card.url) }, enabled = !addonBusy, colors = ButtonDefaults.buttonColors(containerColor = Peach, contentColor = Ink), shape = RoundedCornerShape(12.dp)) { Text("Install", fontSize = 12.sp) }
+                            Button(onClick = { onInstallAddon(card.url) }, enabled = !addonBusy, colors = ButtonDefaults.buttonColors(containerColor = Peach, contentColor = OnAccent), shape = RoundedCornerShape(12.dp)) { Text("Install", fontSize = 12.sp) }
                         }
                         if (card.configurable) {
                             OutlinedButton(onClick = { runCatching { uriHandler.openUri(card.url + "/configure") } }, shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.outlinedButtonColors(contentColor = Cream)) { Text("Configure", fontSize = 12.sp) }
@@ -1010,6 +1056,20 @@ fun SettingsScreen(
                     Text("Slide the featured banner right to left automatically.", color = Muted, fontSize = 12.sp)
                 }
                 Switch(checked = bannerAutoSlide, onCheckedChange = onBannerAutoSlideChange)
+            }
+        }
+        item { HorizontalDivider(color = Panel2) }
+        item { Text("Appearance", color = Cream, fontSize = 18.sp, fontWeight = FontWeight.Bold) }
+        item { Text("Choose the app theme.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp) }
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf("light" to "Light", "dark" to "Dark", "system" to "System").forEach { (value, label) ->
+                    if (themeMode == value) {
+                        Button(onClick = { onThemeModeChange(value) }, colors = ButtonDefaults.buttonColors(containerColor = Peach, contentColor = OnAccent), shape = RoundedCornerShape(12.dp)) { Text(label, fontSize = 12.sp) }
+                    } else {
+                        OutlinedButton(onClick = { onThemeModeChange(value) }, shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.outlinedButtonColors(contentColor = Cream)) { Text(label, fontSize = 12.sp) }
+                    }
+                }
             }
         }
         item { HorizontalDivider(color = Panel2) }
@@ -1058,7 +1118,7 @@ fun SettingsScreen(
         }
         item { Text("Endpoints: home, search?q=…, detail/{id}, stream/{id}. Keep metadata and stream providers separate; the stream endpoint must return an authorized HTTPS URL.", color = Muted, fontSize = 12.sp, lineHeight = 18.sp) }
         item {
-            Button(onClick = { onSave(value, key, jfServer, jfUser, jfToken, jfUserId) }, modifier = Modifier.fillMaxWidth().height(52.dp), colors = ButtonDefaults.buttonColors(containerColor = Peach, contentColor = Ink), shape = RoundedCornerShape(15.dp)) {
+            Button(onClick = { onSave(value, key, jfServer, jfUser, jfToken, jfUserId) }, modifier = Modifier.fillMaxWidth().height(52.dp), colors = ButtonDefaults.buttonColors(containerColor = Peach, contentColor = OnAccent), shape = RoundedCornerShape(15.dp)) {
                 Text("Save settings", fontWeight = FontWeight.Bold)
             }
         }
