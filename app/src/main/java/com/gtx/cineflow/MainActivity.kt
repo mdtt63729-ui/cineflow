@@ -151,6 +151,8 @@ fun CineFlowApp() {
     val tmdbApi = remember { makeTmdbApi() }
     val addonCatalog = remember { AddonCatalogRepository(context) }
     val addonRows by addonCatalog.homeRows.collectAsState()
+    val installedAddons by addonCatalog.addons.collectAsState()
+    val addonSummary by addonCatalog.installSummary.collectAsState()
     val knownMovies = remember {
         mutableStateMapOf<String, Movie>().apply {
             sampleMovies.forEach { put(it.id, it) }
@@ -350,6 +352,9 @@ fun CineFlowApp() {
                         initialJellyfinServer = jellyfinServer, initialJellyfinUser = jellyfinUser,
                         initialJellyfinToken = jellyfinToken, initialJellyfinUserId = jellyfinUserId,
                         onBack = { settingsOpen = false },
+                        addonSummary = addonSummary,
+                        addonNames = installedAddons.map { it.manifest.name },
+                        onRetryAddons = { apiRevision++ },
                         onSave = { value, key, jfServer, jfUser, jfToken, jfUserId ->
                             apiBase = value.trim()
                             tmdbKey = key.trim()
@@ -659,6 +664,7 @@ fun DetailScreen(movie: Movie, canPlay: Boolean, saved: Boolean, onBack: () -> U
 fun SettingsScreen(
     initial: String, initialTmdbKey: String, initialJellyfinServer: String, initialJellyfinUser: String,
     initialJellyfinToken: String, initialJellyfinUserId: String, onBack: () -> Unit,
+    addonSummary: String, addonNames: List<String>, onRetryAddons: () -> Unit,
     onSave: (String, String, String, String, String, String) -> Unit
 ) {
     var value by remember(initial) { mutableStateOf(initial) }
@@ -678,6 +684,25 @@ fun SettingsScreen(
                 Text("Integrations", color = Cream, fontSize = 26.sp, fontWeight = FontWeight.ExtraBold)
             }
         }
+        item { HorizontalDivider(color = Panel2) }
+        item { Text("Add-ons", color = Cream, fontSize = 18.sp, fontWeight = FontWeight.Bold) }
+        item { Text("Public add-ons are installed automatically on first launch, so you never have to add them by hand. Tap below to retry any that could not be reached. These are third-party sources — availability, configuration and legality vary by provider.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp) }
+        item { Text(addonSummary, color = Peach, fontSize = 13.sp, fontWeight = FontWeight.SemiBold) }
+        if (addonNames.isNotEmpty()) {
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    addonNames.take(60).forEach { name ->
+                        Text("• $name", color = Muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
+        }
+        item {
+            OutlinedButton(onClick = onRetryAddons, modifier = Modifier.fillMaxWidth().height(48.dp), shape = RoundedCornerShape(14.dp), colors = ButtonDefaults.outlinedButtonColors(contentColor = Peach)) {
+                Icon(Icons.Default.Refresh, null, modifier = Modifier.size(18.dp)); Spacer(Modifier.width(8.dp)); Text("Install / retry add-ons")
+            }
+        }
+        item { HorizontalDivider(color = Panel2) }
         item { Text("TMDB metadata", color = Cream, fontSize = 18.sp, fontWeight = FontWeight.Bold) }
         item { Text("Trending, popular movies and TV, posters, and multi-search. Create your own key in your TMDB account settings. Metadata does not include streaming links.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp) }
         item {

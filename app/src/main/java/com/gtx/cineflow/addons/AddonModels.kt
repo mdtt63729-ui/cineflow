@@ -33,10 +33,19 @@ data class CatalogRef(
     val genres: List<String> = emptyList(),
     val language: String? = null
 ) {
-    /** Search is advertised only when the manifest explicitly declares a supported search property. */
+    /**
+     * Search is advertised only when the manifest explicitly declares a supported search property.
+     *
+     * The lists are read defensively: Gson populates data classes reflectively and does not apply
+     * Kotlin default values, so a manifest that omits `extra`/`extraSupported` leaves them null.
+     */
     val supportsSearch: Boolean
-        get() = (extra + extraSupported.map { ExtraProp(it) }).any {
-            it.name.equals("search", ignoreCase = true)
+        get() {
+            val declared = (extra as List<ExtraProp>?) ?: emptyList()
+            val supported = (extraSupported as List<String>?) ?: emptyList()
+            return (declared + supported.map { ExtraProp(it) }).any {
+                "search".equals(it.name, ignoreCase = true)
+            }
         }
 }
 

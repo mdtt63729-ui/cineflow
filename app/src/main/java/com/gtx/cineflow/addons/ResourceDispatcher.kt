@@ -20,7 +20,13 @@ class ResourceDispatcher(private val client: AddonClient, private val gson: Gson
         val semaphore = Semaphore(MAX_CONCURRENT_REQUESTS)
         supervisorScope {
             addons.filter { it.enabled }.forEach { addon ->
-                addon.manifest.catalogs.take(perAddonCatalogLimit.coerceIn(1, 20)).forEach { catalog ->
+                // Defensive: one malformed manifest must never abort the whole home feed.
+                val catalogs = try {
+                    addon.manifest.catalogs ?: emptyList()
+                } catch (_: Exception) {
+                    emptyList()
+                }
+                catalogs.take(perAddonCatalogLimit.coerceIn(1, 20)).forEach { catalog ->
                     launchCatalog(addon, catalog, emptyMap(), semaphore) { send(it) }
                 }
             }

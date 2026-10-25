@@ -41,6 +41,14 @@ class AddonCatalogRepository(
     private val _homeError = MutableStateFlow<String?>(null)
     val homeError: StateFlow<String?> = _homeError.asStateFlow()
 
+    /** Snapshot of installed add-ons, for the settings screen. */
+    private val _addons = MutableStateFlow<List<AddonRecord>>(emptyList())
+    val addons: StateFlow<List<AddonRecord>> = _addons.asStateFlow()
+
+    /** Human-readable result of the last built-in install pass. */
+    private val _installSummary = MutableStateFlow("Add-ons have not been loaded yet.")
+    val installSummary: StateFlow<String> = _installSummary.asStateFlow()
+
     private var restored = false
 
     private suspend fun ensureRestored() {
@@ -50,6 +58,7 @@ class AddonCatalogRepository(
             manager.restore(store.addons.first())
             restored = true
         }
+        _addons.value = manager.all()
     }
 
     suspend fun installedAddons(): List<AddonRecord> {
@@ -70,12 +79,16 @@ class AddonCatalogRepository(
         ensureRestored()
         val installed = manager.all().mapNotNull {
             AddonClient.normalizeBaseUrl(it.baseUrl)?.toString()?.trimEnd('/')
-        }.toMutableSet()
+        }.toSet()
         val pending = BuiltInAddonRegistry.addons.mapNotNull { spec ->
             val normalized = AddonClient.normalizeBaseUrl(spec.baseUrl)?.toString()?.trimEnd('/')
             if (normalized == null || normalized in installed) null else normalized
         }.distinct()
-        if (pending.isEmpty()) return emptyList()
+        if (pending.isEmpty()) {
+            _installSummary.value = "All ${BuiltInAddonRegistry.addons.size} built-in add-ons are already installed."
+            _addons.value = manager.all()
+            return emptyList()
+        }
 
         val semaphore = Semaphore(INSTALL_CONCURRENCY)
         val results = supervisorScope {
@@ -93,7 +106,11 @@ class AddonCatalogRepository(
                 }
             }.awaitAll()
         }
-        if (results.any { it is AddonResult.Success }) persistManagerState()
+        val ok = results.count { it is AddonResult.Success }
+        val bad = results.size - ok
+        _installSummary.value = "Installed $ok of ${pending.size} add-ons. $bad could not be reached."
+        _addons.value = manager.all()
+        if (ok > 0) persistManagerState()
         return results
     }
 
@@ -103,6 +120,7 @@ class AddonCatalogRepository(
             is AddonResult.Failure -> result
             is AddonResult.Success -> {
                 persistManagerState()
+                _addons.value = manager.all()
                 result
             }
         }
@@ -113,6 +131,7 @@ class AddonCatalogRepository(
         val changed = manager.setEnabled(baseUrl, enabled)
         if (changed) {
             persistManagerState()
+            _addons.value = manager.all()
             refreshHome()
         }
         return changed
@@ -123,6 +142,7 @@ class AddonCatalogRepository(
         val removed = manager.uninstall(baseUrl)
         if (removed) {
             persistManagerState()
+            _addons.value = manager.all()
             refreshHome()
         }
         return removed
@@ -141,17 +161,20 @@ class AddonCatalogRepository(
         try {
             // Bounded so a large add-on list cannot flood the home feed with hundreds of rows.
             val enabled = manager.enabled().take(MAX_HOME_ADDONS)
-            if (enabled.isEmpty()) return
+            if (enabled.isEmpty()) {
+                _homeError.value = "No enabled add-ons to read catalogues from."
+                return
+            }
             dispatcher.homeRows(enabled, perAddonCatalogLimit = HOME_CATALOGS_PER_ADDON).collect { result ->
                 _homeRows.value = _homeRows.value + result
             }
-            if (_homeRows.value.isEmpty()) {
-                _homeError.value = "Installed addons returned no catalogs."
+            if (_homeRows.value.none { it.error == null && it.items.isNotEmpty() }) {
+                _homeError.value = "No add-on catalogue returned any titles. Check your network or retry from Settings."
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {
-            _homeError.value = "Add-on catalogs could not be loaded. Check your network or addon settings."
+            _homeError.value = "Add-on catalogues could not be loaded. Check your network or addon settings."
         } finally {
             _isLoadingHome.value = false
         }
