@@ -40,6 +40,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import androidx.compose.ui.viewinterop.AndroidView
 import com.gtx.cineflow.addons.AddonCatalogRepository
+import com.gtx.cineflow.addons.CatalogItem
 import coil.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -71,6 +72,19 @@ data class Movie(
     val rating: String = "",
     val kind: String = "Movie",
     val streamUrl: String = ""
+)
+
+/** Maps a Stremio-style catalogue entry into the app's Movie model. */
+private fun CatalogItem.toMovie(): Movie = Movie(
+    id = id,
+    title = name,
+    overview = description.orEmpty(),
+    posterUrl = poster.orEmpty(),
+    backdropUrl = background ?: poster.orEmpty(),
+    year = releaseInfo?.take(4).orEmpty(),
+    rating = imdbRating ?: "—",
+    kind = if (type.equals("series", true) || type.equals("tv", true)) "TV" else "Movie",
+    streamUrl = ""
 )
 data class HomeSection(val title: String = "Featured", val items: List<Movie> = emptyList())
 data class HomeResponse(val sections: List<HomeSection> = emptyList())
@@ -135,6 +149,8 @@ fun CineFlowApp() {
     var jellyfinToken by remember { mutableStateOf(prefs.getString("jellyfin_token", "") ?: "") }
     var jellyfinUserId by remember { mutableStateOf(prefs.getString("jellyfin_user_id", "") ?: "") }
     val tmdbApi = remember { makeTmdbApi() }
+    val addonCatalog = remember { AddonCatalogRepository(context) }
+    val addonRows by addonCatalog.homeRows.collectAsState()
     val knownMovies = remember {
         mutableStateMapOf<String, Movie>().apply {
             sampleMovies.forEach { put(it.id, it) }
@@ -163,9 +179,24 @@ fun CineFlowApp() {
             .putString("known_movies", com.google.gson.Gson().toJson(knownMovies.values.toList())).apply()
     }
 
-    LaunchedEffect(Unit) {
-        // Seed public, metadata/subtitle-oriented add-ons once; failures remain non-fatal.
-        runCatching { AddonCatalogRepository(context).installBuiltInsIfMissing() }
+    LaunchedEffect(apiRevision) {
+        // Seed the built-in add-ons once, then load their catalogues for the home feed.
+        // Failures stay non-fatal: unreachable add-ons are simply skipped.
+        runCatching {
+            addonCatalog.installBuiltInsIfMissing()
+            addonCatalog.refreshHome()
+        }
+    }
+
+    val addonSections = remember(addonRows) {
+        addonRows.filter { it.error == null && it.items.isNotEmpty() }.map { row ->
+            val addonName = row.request.addon.manifest.name
+            val catalogName = row.request.catalog.name ?: row.request.catalog.id
+            HomeSection("$addonName · $catalogName", row.items.map { it.toMovie() })
+        }
+    }
+    LaunchedEffect(addonSections) {
+        addonSections.forEach { section -> section.items.forEach { knownMovies[it.id] = it } }
     }
 
     LaunchedEffect(apiRevision) {
@@ -360,6 +391,7 @@ fun CineFlowApp() {
                                 sections = buildList {
                                     val continueItems = playbackProgress.values.sortedByDescending { it.updatedAt }.mapNotNull { progress -> knownMovies[progress.movieId] }
                                     if (continueItems.isNotEmpty()) add(HomeSection("Continue watching", continueItems))
+                                    addAll(addonSections)
                                     addAll(sections)
                                 }, loading = loading, onOpen = { current = it },
                                 onPlay = { playing = it }, onSettings = { settingsOpen = true },
