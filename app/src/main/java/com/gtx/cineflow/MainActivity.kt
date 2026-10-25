@@ -8,13 +8,26 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.Crossfade
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
@@ -28,6 +41,7 @@ import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
@@ -145,6 +159,8 @@ class MainActivity : ComponentActivity() {
 fun CineFlowApp() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val homeListState = rememberLazyListState()
+    val libraryListState = rememberLazyListState()
     val prefs = remember { context.getSharedPreferences("cineflow", Context.MODE_PRIVATE) }
     var apiRevision by remember { mutableIntStateOf(0) }
     val api = remember(apiRevision) { makeApi(context) }
@@ -457,28 +473,9 @@ fun CineFlowApp() {
                             settingsOpen = false
                         }
                     )
-                    else -> Scaffold(
-                        containerColor = Ink,
-                        bottomBar = {
-                            NavigationBar(containerColor = Color(0xFF101116), contentColor = Cream) {
-                                NavigationBarItem(
-                                    selected = tab == "Home", onClick = { tab = "Home" },
-                                    icon = { Icon(Icons.Default.Home, null) }, label = { Text("Home") },
-                                    colors = navColors()
-                                )
-                                NavigationBarItem(
-                                    selected = tab == "Search", onClick = { tab = "Search" },
-                                    icon = { Icon(Icons.Default.Search, null) }, label = { Text("Search") },
-                                    colors = navColors()
-                                )
-                                NavigationBarItem(
-                                    selected = tab == "Library", onClick = { tab = "Library" },
-                                    icon = { Icon(Icons.Default.VideoLibrary, null) }, label = { Text("Library") },
-                                    colors = navColors()
-                                )
-                            }
-                        }
-                    ) { padding ->
+                    else -> Box(Modifier.fillMaxSize().background(Ink)) {
+                        val activeListState = if (tab == "Library") libraryListState else homeListState
+                        val navVisible = navVisibleFrom(activeListState)
                         when (tab) {
                             "Home" -> HomeScreen(
                                 sections = buildList {
@@ -489,16 +486,104 @@ fun CineFlowApp() {
                                 }, loading = loading, addonLoading = addonLoading, addonError = addonError,
                                 bannerAutoSlide = bannerAutoSlide, onOpen = { current = it },
                                 onPlay = { playing = it; recordHistory(it) }, onSettings = { settingsOpen = true },
-                                onSearch = { tab = "Search" }, onRefresh = { apiRevision++ }
+                                onSearch = { tab = "Search" }, onRefresh = { apiRevision++ },
+                                listState = homeListState
                             )
                             "Search" -> SearchScreen(query, { query = it }, results, onOpen = { current = it })
                             else -> LibraryScreen(
                                 continueItems = playbackProgress.values.sortedByDescending { it.updatedAt }.mapNotNull { knownMovies[it.movieId] },
                                 historyItems = history.mapNotNull { knownMovies[it] },
                                 watchlistItems = knownMovies.values.filter { watchlist.contains(it.id) },
-                                onOpen = { current = it }
+                                onOpen = { current = it },
+                                listState = libraryListState
                             )
                         }
+                        AnimatedVisibility(
+                            visible = navVisible,
+                            modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding(),
+                            enter = slideInVertically(
+                                initialOffsetY = { it * 3 },
+                                animationSpec = spring(dampingRatio = 0.55f, stiffness = Spring.StiffnessMediumLow)
+                            ) + fadeIn(animationSpec = tween(180)) +
+                                scaleIn(initialScale = 0.86f, animationSpec = spring(dampingRatio = 0.5f, stiffness = Spring.StiffnessMediumLow)),
+                            exit = slideOutVertically(
+                                targetOffsetY = { it * 3 },
+                                animationSpec = spring(dampingRatio = 0.9f, stiffness = Spring.StiffnessMedium)
+                            ) + fadeOut(animationSpec = tween(140)) +
+                                scaleOut(targetScale = 0.86f, animationSpec = spring(dampingRatio = 0.9f, stiffness = Spring.StiffnessMedium))
+                        ) {
+                            FloatingNavBar(selected = tab, onSelect = { tab = it })
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Hides the floating bar while scrolling forward and brings it back the moment you scroll back. */
+@Composable
+private fun navVisibleFrom(state: LazyListState): Boolean {
+    var visible by remember { mutableStateOf(true) }
+    var lastIndex by remember { mutableIntStateOf(0) }
+    var lastOffset by remember { mutableIntStateOf(0) }
+    LaunchedEffect(state) {
+        snapshotFlow { state.firstVisibleItemIndex to state.firstVisibleItemScrollOffset }
+            .collect { (index, offset) ->
+                val forward = index > lastIndex || (index == lastIndex && offset > lastOffset + 6)
+                val back = index < lastIndex || (index == lastIndex && offset < lastOffset - 6)
+                if (forward && (index > 0 || offset > 60)) visible = false
+                if (back) visible = true
+                lastIndex = index
+                lastOffset = offset
+            }
+    }
+    return visible
+}
+
+/** Material 3 style floating navigation bar with a spring-animated selection pill. */
+@Composable
+fun FloatingNavBar(selected: String, onSelect: (String) -> Unit) {
+    val items = listOf(
+        Triple("Home", Icons.Default.Home, "Home"),
+        Triple("Search", Icons.Default.Search, "Search"),
+        Triple("Library", Icons.Default.VideoLibrary, "Library"),
+    )
+    val selectedIndex = items.indexOfFirst { it.first == selected }.coerceAtLeast(0)
+    Surface(
+        modifier = Modifier.padding(horizontal = 22.dp, vertical = 10.dp).fillMaxWidth(),
+        shape = RoundedCornerShape(28.dp),
+        color = Panel2,
+        shadowElevation = 16.dp
+    ) {
+        BoxWithConstraints(Modifier.padding(6.dp).height(58.dp)) {
+            val itemWidth = maxWidth / items.size
+            val indicatorX by animateDpAsState(
+                targetValue = itemWidth * selectedIndex,
+                animationSpec = spring(dampingRatio = 0.45f, stiffness = Spring.StiffnessMediumLow),
+                label = "navIndicator"
+            )
+            Box(
+                Modifier.offset(x = indicatorX).width(itemWidth).height(58.dp)
+                    .clip(RoundedCornerShape(22.dp)).background(Peach.copy(alpha = 0.16f))
+            )
+            Row(Modifier.fillMaxWidth().height(58.dp)) {
+                items.forEachIndexed { index, item ->
+                    val active = index == selectedIndex
+                    val iconScale by animateFloatAsState(
+                        targetValue = if (active) 1.14f else 1f,
+                        animationSpec = spring(dampingRatio = 0.4f, stiffness = Spring.StiffnessMedium),
+                        label = "navScale"
+                    )
+                    Column(
+                        Modifier.weight(1f).height(58.dp).clip(RoundedCornerShape(22.dp))
+                            .clickable { onSelect(item.first) },
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(item.second, item.third, tint = if (active) Peach else Muted, modifier = Modifier.size(22.dp).scale(iconScale))
+                        Spacer(Modifier.height(3.dp))
+                        Text(item.third, color = if (active) Peach else Muted, fontSize = 10.sp, fontWeight = if (active) FontWeight.Bold else FontWeight.Medium, maxLines = 1)
                     }
                 }
             }
@@ -517,12 +602,14 @@ private fun navColors() = NavigationBarItemDefaults.colors(
 fun HomeScreen(
     sections: List<HomeSection>, loading: Boolean, addonLoading: Boolean, addonError: String?,
     bannerAutoSlide: Boolean, onOpen: (Movie) -> Unit,
-    onPlay: (Movie) -> Unit, onSettings: () -> Unit, onSearch: () -> Unit, onRefresh: () -> Unit
+    onPlay: (Movie) -> Unit, onSettings: () -> Unit, onSearch: () -> Unit, onRefresh: () -> Unit,
+    listState: LazyListState = rememberLazyListState()
 ) {
     val heroItems = sections.firstOrNull()?.items.orEmpty()
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(bottom = 24.dp),
+        state = listState,
+        contentPadding = PaddingValues(bottom = 124.dp),
         verticalArrangement = Arrangement.spacedBy(22.dp)
     ) {
         item {
@@ -615,11 +702,13 @@ fun HeroCarousel(items: List<Movie>, onOpen: (Movie) -> Unit, onPlay: (Movie) ->
 @Composable
 fun LibraryScreen(
     continueItems: List<Movie>, historyItems: List<Movie>, watchlistItems: List<Movie>,
-    onOpen: (Movie) -> Unit
+    onOpen: (Movie) -> Unit,
+    listState: LazyListState = rememberLazyListState()
 ) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(bottom = 24.dp),
+        state = listState,
+        contentPadding = PaddingValues(bottom = 124.dp),
         verticalArrangement = Arrangement.spacedBy(22.dp)
     ) {
         item {
