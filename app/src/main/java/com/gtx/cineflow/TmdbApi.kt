@@ -19,12 +19,31 @@ data class TmdbItem(
     @SerializedName("release_date") val releaseDate: String? = null,
     @SerializedName("first_air_date") val firstAirDate: String? = null,
     @SerializedName("vote_average") val voteAverage: Double = 0.0,
-    @SerializedName("media_type") val mediaType: String? = null
+    @SerializedName("media_type") val mediaType: String? = null,
+    @SerializedName("original_language") val originalLanguage: String? = null,
+    @SerializedName("origin_country") val originCountry: List<String> = emptyList()
 )
 interface TmdbApi {
     @GET("trending/all/day") suspend fun trending(@Query("api_key") key: String): TmdbListResponse
     @GET("movie/popular") suspend fun popularMovies(@Query("api_key") key: String): TmdbListResponse
     @GET("tv/popular") suspend fun popularTv(@Query("api_key") key: String): TmdbListResponse
+    @GET("discover/movie") suspend fun indianMovies(
+        @Query("api_key") key: String,
+        @Query("language") language: String = "en-IN",
+        @Query("region") region: String = "IN",
+        @Query("sort_by") sortBy: String = "popularity.desc",
+        @Query("with_origin_country") originCountry: String = "IN",
+        @Query("with_original_language") originalLanguage: String = "hi|bn|ta|te|ml|kn|mr|pa",
+        @Query("include_adult") includeAdult: Boolean = false
+    ): TmdbListResponse
+    @GET("discover/tv") suspend fun indianTv(
+        @Query("api_key") key: String,
+        @Query("language") language: String = "en-IN",
+        @Query("sort_by") sortBy: String = "popularity.desc",
+        @Query("with_origin_country") originCountry: String = "IN",
+        @Query("with_original_language") originalLanguage: String = "hi|bn|ta|te|ml|kn|mr|pa",
+        @Query("include_adult") includeAdult: Boolean = false
+    ): TmdbListResponse
     @GET("search/multi") suspend fun search(@Query("api_key") key: String, @Query("query") query: String, @Query("include_adult") adult: Boolean = false): TmdbListResponse
 }
 fun makeTmdbApi(): TmdbApi = Retrofit.Builder()

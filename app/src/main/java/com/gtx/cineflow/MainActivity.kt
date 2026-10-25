@@ -39,6 +39,7 @@ import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import androidx.compose.ui.viewinterop.AndroidView
+import com.gtx.cineflow.addons.AddonCatalogRepository
 import coil.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -99,19 +100,9 @@ private fun makeApi(context: Context): CatalogueApi? {
     } catch (_: Exception) { null }
 }
 
-private val sampleMovies = listOf(
-    Movie("sample-1", "The Last Horizon", "A rescue crew follows a mysterious signal beyond the edge of mapped space.", year = "2025", rating = "8.4", kind = "Sci-Fi", posterUrl = "https://images.unsplash.com/photo-1446776811953-b23d57bd21aa?w=700", backdropUrl = "https://images.unsplash.com/photo-1462331940025-496dfbfc7564?w=1400", streamUrl = SAMPLE_STREAM),
-    Movie("sample-2", "Midnight Run", "One night. One impossible delivery. A city full of secrets.", year = "2024", rating = "7.9", kind = "Thriller", posterUrl = "https://images.unsplash.com/photo-1519608487953-e999c86e7455?w=700", backdropUrl = "https://images.unsplash.com/photo-1519608487953-e999c86e7455?w=1400", streamUrl = SAMPLE_STREAM),
-    Movie("sample-3", "Wild Earth", "A breathtaking journey through the world's last untouched wilderness.", year = "2025", rating = "9.0", kind = "Documentary", posterUrl = "https://images.unsplash.com/photo-1472396961693-142e6e269027?w=700", backdropUrl = "https://images.unsplash.com/photo-1472396961693-142e6e269027?w=1400", streamUrl = SAMPLE_STREAM),
-    Movie("sample-4", "Neon District", "A rookie detective uncovers a conspiracy hidden beneath the city lights.", year = "2023", rating = "8.1", kind = "Crime", posterUrl = "https://images.unsplash.com/photo-1519608487953-e999c86e7455?w=700", backdropUrl = "https://images.unsplash.com/photo-1519608487953-e999c86e7455?w=1400", streamUrl = SAMPLE_STREAM),
-    Movie("sample-5", "Ocean Between Us", "Two strangers find a new beginning on a remote island.", year = "2024", rating = "7.7", kind = "Drama", posterUrl = "https://images.unsplash.com/photo-1500375592092-40eb2168fd21?w=700", backdropUrl = "https://images.unsplash.com/photo-1500375592092-40eb2168fd21?w=1400", streamUrl = SAMPLE_STREAM),
-    Movie("sample-6", "Beyond the Pines", "A small town must face the truth about a long-forgotten disappearance.", year = "2022", rating = "8.0", kind = "Mystery", posterUrl = "https://images.unsplash.com/photo-1448375240586-882707db888b?w=700", backdropUrl = "https://images.unsplash.com/photo-1448375240586-882707db888b?w=1400", streamUrl = SAMPLE_STREAM)
-)
-private fun sampleSections() = listOf(
-    HomeSection("Trending now", sampleMovies),
-    HomeSection("Popular this week", sampleMovies.reversed()),
-    HomeSection("Recently added", sampleMovies.shuffled())
-)
+// No fabricated international demo titles are shown as recommendations.
+private val sampleMovies = emptyList<Movie>()
+private fun sampleSections() = emptyList<HomeSection>()
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -172,6 +163,11 @@ fun CineFlowApp() {
             .putString("known_movies", com.google.gson.Gson().toJson(knownMovies.values.toList())).apply()
     }
 
+    LaunchedEffect(Unit) {
+        // Seed public, metadata/subtitle-oriented add-ons once; failures remain non-fatal.
+        runCatching { AddonCatalogRepository(context).installBuiltInsIfMissing() }
+    }
+
     LaunchedEffect(apiRevision) {
         loading = true
         var loaded = false
@@ -200,9 +196,14 @@ fun CineFlowApp() {
                 val key = tmdbKey.trim()
                 val remoteSections = withContext(Dispatchers.IO) {
                     listOf(
-                        HomeSection("Trending today", tmdbApi.trending(key).results.filter { it.mediaType != "person" }.map { it.toMovie() }),
-                        HomeSection("Popular movies", tmdbApi.popularMovies(key).results.map { it.copy(mediaType = "movie").toMovie() }),
-                        HomeSection("Popular TV", tmdbApi.popularTv(key).results.map { it.copy(mediaType = "tv").toMovie() })
+                        HomeSection(
+                            "Indian movies · Hindi, Bengali & regional",
+                            tmdbApi.indianMovies(key).results.map { it.copy(mediaType = "movie").toMovie() }
+                        ),
+                        HomeSection(
+                            "Indian series · Hindi, Bengali & regional",
+                            tmdbApi.indianTv(key).results.map { it.copy(mediaType = "tv").toMovie() }
+                        )
                     ).filter { it.items.isNotEmpty() }
                 }
                 if (remoteSections.isNotEmpty()) { sections = remoteSections; remoteSections.flatMap { it.items }.forEach { knownMovies[it.id] = it }; loaded = true }
@@ -390,7 +391,7 @@ fun HomeScreen(
     sections: List<HomeSection>, loading: Boolean, onOpen: (Movie) -> Unit,
     onPlay: (Movie) -> Unit, onSettings: () -> Unit, onSearch: () -> Unit
 ) {
-    val hero = sections.firstOrNull()?.items?.firstOrNull() ?: sampleMovies.first()
+    val hero = sections.firstOrNull()?.items?.firstOrNull()
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(bottom = 24.dp),
@@ -411,7 +412,23 @@ fun HomeScreen(
                 IconButton(onClick = onSettings) { Icon(Icons.Default.Tune, "Settings", tint = Cream) }
             }
         }
-        item { HeroBanner(hero, onOpen, onPlay) }
+        if (hero != null) {
+            item { HeroBanner(hero, onOpen, onPlay) }
+        } else if (!loading) {
+            item {
+                Column(
+                    Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 28.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text("Indian cinema, one place.", color = Cream, fontSize = 24.sp, fontWeight = FontWeight.ExtraBold)
+                    Text(
+                        "Add your TMDB API key in Settings → Integrations to load Indian movies and series across Hindi, Bengali and other regional languages. Catalog metadata does not confirm whether a title has a Hindi or Bengali dub.",
+                        color = Muted, fontSize = 14.sp, lineHeight = 20.sp
+                    )
+                    OutlinedButton(onClick = onSettings) { Icon(Icons.Default.Tune, null); Spacer(Modifier.width(8.dp)); Text("Set up catalogue") }
+                }
+            }
+        }
         if (loading) {
             item {
                 Column(Modifier.padding(horizontal = 20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {

@@ -51,6 +51,35 @@ class AddonCatalogRepository(
         return manager.all()
     }
 
+    /**
+     * Installs missing public defaults once and persists successful manifests.
+     * Existing user settings and disabled states are preserved; unavailable endpoints are skipped
+     * as failures and can be retried later.
+     */
+    suspend fun installBuiltInsIfMissing(): List<AddonResult<AddonRecord>> {
+        ensureRestored()
+        val installed = manager.all().mapNotNull {
+            AddonClient.normalizeBaseUrl(it.baseUrl)?.toString()?.trimEnd('/')
+        }.toMutableSet()
+        val results = mutableListOf<AddonResult<AddonRecord>>()
+        for (spec in BuiltInAddonRegistry.addons) {
+            val normalized = AddonClient.normalizeBaseUrl(spec.baseUrl)?.toString()?.trimEnd('/')
+                ?: continue
+            if (normalized in installed) continue
+            val result = try {
+                manager.install(normalized)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                AddonResult.Failure(AddonError(normalized, error.message ?: "Could not install built-in add-on."))
+            }
+            results += result
+            if (result is AddonResult.Success) installed += normalized
+        }
+        if (results.any { it is AddonResult.Success }) persistManagerState()
+        return results
+    }
+
     suspend fun install(url: String): AddonResult<AddonRecord> {
         ensureRestored()
         return when (val result = manager.install(url)) {

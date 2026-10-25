@@ -1,5 +1,15 @@
 # CineFlow — modular Android movie & TV app
 
+# Latest source update — India-focused catalogue and built-in add-ons
+
+- Home recommendations now request Indian-origin movies and series in Hindi, Bengali, Tamil, Telugu, Malayalam, Kannada, Marathi, and Punjabi using TMDB Discover.
+- Placeholder international demo titles have been removed from Home so the app does not present fabricated items as India-focused recommendations.
+- On first launch, CineFlow attempts to install a small set of public metadata, YouTube-catalogue, legal-availability, and subtitle add-ons into local add-on storage. Existing installed entries and disabled states are preserved. An add-on endpoint that is offline or changes its manifest will be skipped rather than crashing startup.
+- A separate **Build Android APK (Debug)** GitHub Actions workflow now builds an unsigned debug APK and publishes the `CineFlow-debug-apk` artifact without requiring signing secrets. The existing signed release workflow remains available.
+
+**Important catalogue limitation:** TMDB original-language metadata identifies the title's original language; it does not prove that a Hindi or Bengali dub exists. The current India-focused home feed therefore prioritizes Indian-origin titles in listed languages. A true “Hindi-dubbed/Bengali-dubbed” filter requires reliable dub/audio-track metadata from the catalogue or playback provider. TMDB metadata alone does not provide playable media links.
+
+
 Native Android app built with Kotlin, Jetpack Compose, Material 3, Retrofit/Gson, Coil, and AndroidX Media3. This update includes Phase 1 (TMDB metadata, configurable authorized catalogue, local watchlist) and Phase 2 (Jellyfin personal media server connection, library browsing, and direct server playback). It is not a claim that all 16 repositories or every optional provider have been integrated.
 
 ## Current integration status
