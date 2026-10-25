@@ -15,6 +15,8 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -30,6 +32,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -40,6 +43,8 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import androidx.compose.ui.viewinterop.AndroidView
 import com.gtx.cineflow.addons.AddonCatalogRepository
+import com.gtx.cineflow.addons.AddonClient
+import com.gtx.cineflow.addons.BuiltInAddonRegistry
 import com.gtx.cineflow.addons.CatalogItem
 import coil.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
@@ -54,12 +59,13 @@ import retrofit2.http.Path
 import retrofit2.http.Query
 import java.net.URI
 
-private val Ink = Color(0xFF0B0C10)
-private val Panel = Color(0xFF171920)
-private val Panel2 = Color(0xFF22242D)
-private val Peach = Color(0xFFFFA17A)
-private val Cream = Color(0xFFF4F0EA)
-private val Muted = Color(0xFFA6A8B2)
+// MovieBox-style dark palette: near-black surfaces with a green accent.
+private val Ink = Color(0xFF070A0F)
+private val Panel = Color(0xFF121821)
+private val Panel2 = Color(0xFF1C2530)
+private val Peach = Color(0xFF00E08F)
+private val Cream = Color(0xFFF3F6F8)
+private val Muted = Color(0xFF93A1AE)
 private const val SAMPLE_STREAM = "https://storage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
 
 data class Movie(
@@ -86,6 +92,14 @@ private fun CatalogItem.toMovie(): Movie = Movie(
     kind = if (type.equals("series", true) || type.equals("tv", true)) "TV" else "Movie",
     streamUrl = ""
 )
+data class AddonCard(
+    val label: String = "",
+    val url: String = "",
+    val purpose: String = "",
+    val status: String = "Not installed",
+    val configurable: Boolean = false
+)
+
 data class HomeSection(val title: String = "Featured", val items: List<Movie> = emptyList())
 data class HomeResponse(val sections: List<HomeSection> = emptyList())
 data class MovieListResponse(val items: List<Movie> = emptyList())
@@ -142,6 +156,7 @@ fun CineFlowApp() {
     var query by remember { mutableStateOf("") }
     var results by remember { mutableStateOf(sampleMovies) }
     var settingsOpen by remember { mutableStateOf(false) }
+    var bannerAutoSlide by remember { mutableStateOf(prefs.getBoolean("banner_auto_slide", true)) }
     var apiBase by remember { mutableStateOf(prefs.getString("api_base", "") ?: "") }
     var tmdbKey by remember { mutableStateOf(prefs.getString("tmdb_key", "") ?: "") }
     var jellyfinServer by remember { mutableStateOf(prefs.getString("jellyfin_server", "") ?: "") }
@@ -153,6 +168,10 @@ fun CineFlowApp() {
     val addonRows by addonCatalog.homeRows.collectAsState()
     val installedAddons by addonCatalog.addons.collectAsState()
     val addonSummary by addonCatalog.installSummary.collectAsState()
+    val addonLoading by addonCatalog.isLoadingHome.collectAsState()
+    val addonError by addonCatalog.homeError.collectAsState()
+    val addonInstallResults by addonCatalog.installResults.collectAsState()
+    var addonBusy by remember { mutableStateOf(false) }
     val knownMovies = remember {
         mutableStateMapOf<String, Movie>().apply {
             sampleMovies.forEach { put(it.id, it) }
@@ -180,6 +199,21 @@ fun CineFlowApp() {
         prefs.edit().putStringSet("watchlist_ids", watchlist.toSet())
             .putString("known_movies", com.google.gson.Gson().toJson(knownMovies.values.toList())).apply()
     }
+    val history = remember {
+        mutableStateListOf<String>().apply {
+            try {
+                val saved = com.google.gson.Gson().fromJson(prefs.getString("history_ids", "[]"), Array<String>::class.java).orEmpty()
+                addAll(saved)
+            } catch (_: Exception) { }
+        }
+    }
+    fun recordHistory(movie: Movie) {
+        history.remove(movie.id)
+        history.add(0, movie.id)
+        while (history.size > 60) history.removeAt(history.size - 1)
+        knownMovies[movie.id] = movie
+        prefs.edit().putString("history_ids", com.google.gson.Gson().toJson(history.toList())).apply()
+    }
 
     LaunchedEffect(apiRevision) {
         // Seed the built-in add-ons once, then load their catalogues for the home feed.
@@ -199,6 +233,29 @@ fun CineFlowApp() {
     }
     LaunchedEffect(addonSections) {
         addonSections.forEach { section -> section.items.forEach { knownMovies[it.id] = it } }
+    }
+
+    val addonCards = remember(installedAddons, addonInstallResults) {
+        val byUrl = installedAddons.associateBy {
+            AddonClient.normalizeBaseUrl(it.baseUrl)?.toString()?.trimEnd('/') ?: it.baseUrl
+        }
+        BuiltInAddonRegistry.addons.map { spec ->
+            val key = AddonClient.normalizeBaseUrl(spec.baseUrl)?.toString()?.trimEnd('/') ?: spec.baseUrl
+            val record = byUrl[key]
+            val status = when {
+                record != null -> "Installed"
+                addonInstallResults[key] == "failed" -> "Not installable"
+                else -> "Not installed"
+            }
+            AddonCard(
+                label = record?.manifest?.name ?: spec.baseUrl.removePrefix("https://").substringBefore('/'),
+                url = key,
+                purpose = spec.purpose,
+                status = status,
+                configurable = record?.manifest?.behaviorHints?.configurable == true ||
+                    record?.manifest?.behaviorHints?.configurationRequired == true,
+            )
+        }
     }
 
     LaunchedEffect(apiRevision) {
@@ -353,8 +410,39 @@ fun CineFlowApp() {
                         initialJellyfinToken = jellyfinToken, initialJellyfinUserId = jellyfinUserId,
                         onBack = { settingsOpen = false },
                         addonSummary = addonSummary,
-                        addonNames = installedAddons.map { it.manifest.name },
-                        onRetryAddons = { apiRevision++ },
+                        addonCards = addonCards,
+                        addonBusy = addonBusy,
+                        onInstallAddon = { url ->
+                            scope.launch {
+                                addonBusy = true
+                                runCatching { addonCatalog.install(url) }
+                                runCatching { addonCatalog.refreshHome() }
+                                addonBusy = false
+                            }
+                        },
+                        onDeleteAddon = { url ->
+                            scope.launch {
+                                addonBusy = true
+                                runCatching { addonCatalog.uninstall(url) }
+                                runCatching { addonCatalog.refreshHome() }
+                                addonBusy = false
+                            }
+                        },
+                        onRetryAddons = {
+                            scope.launch {
+                                addonBusy = true
+                                runCatching {
+                                    addonCatalog.installBuiltInsIfMissing()
+                                    addonCatalog.refreshHome()
+                                }
+                                addonBusy = false
+                            }
+                        },
+                        bannerAutoSlide = bannerAutoSlide,
+                        onBannerAutoSlideChange = { checked ->
+                            bannerAutoSlide = checked
+                            prefs.edit().putBoolean("banner_auto_slide", checked).apply()
+                        },
                         onSave = { value, key, jfServer, jfUser, jfToken, jfUserId ->
                             apiBase = value.trim()
                             tmdbKey = key.trim()
@@ -384,8 +472,8 @@ fun CineFlowApp() {
                                     colors = navColors()
                                 )
                                 NavigationBarItem(
-                                    selected = tab == "Saved", onClick = { tab = "Saved" },
-                                    icon = { Icon(Icons.Default.Bookmark, null) }, label = { Text("Saved") },
+                                    selected = tab == "Library", onClick = { tab = "Library" },
+                                    icon = { Icon(Icons.Default.VideoLibrary, null) }, label = { Text("Library") },
                                     colors = navColors()
                                 )
                             }
@@ -398,14 +486,16 @@ fun CineFlowApp() {
                                     if (continueItems.isNotEmpty()) add(HomeSection("Continue watching", continueItems))
                                     addAll(addonSections)
                                     addAll(sections)
-                                }, loading = loading, onOpen = { current = it },
-                                onPlay = { playing = it }, onSettings = { settingsOpen = true },
-                                onSearch = { tab = "Search" }
+                                }, loading = loading, addonLoading = addonLoading, addonError = addonError,
+                                bannerAutoSlide = bannerAutoSlide, onOpen = { current = it },
+                                onPlay = { playing = it; recordHistory(it) }, onSettings = { settingsOpen = true },
+                                onSearch = { tab = "Search" }, onRefresh = { apiRevision++ }
                             )
                             "Search" -> SearchScreen(query, { query = it }, results, onOpen = { current = it })
-                            else -> MovieGrid(
-                                title = "Your watchlist",
-                                movies = knownMovies.values.filter { watchlist.contains(it.id) },
+                            else -> LibraryScreen(
+                                continueItems = playbackProgress.values.sortedByDescending { it.updatedAt }.mapNotNull { knownMovies[it.movieId] },
+                                historyItems = history.mapNotNull { knownMovies[it] },
+                                watchlistItems = knownMovies.values.filter { watchlist.contains(it.id) },
                                 onOpen = { current = it }
                             )
                         }
@@ -425,10 +515,11 @@ private fun navColors() = NavigationBarItemDefaults.colors(
 
 @Composable
 fun HomeScreen(
-    sections: List<HomeSection>, loading: Boolean, onOpen: (Movie) -> Unit,
-    onPlay: (Movie) -> Unit, onSettings: () -> Unit, onSearch: () -> Unit
+    sections: List<HomeSection>, loading: Boolean, addonLoading: Boolean, addonError: String?,
+    bannerAutoSlide: Boolean, onOpen: (Movie) -> Unit,
+    onPlay: (Movie) -> Unit, onSettings: () -> Unit, onSearch: () -> Unit, onRefresh: () -> Unit
 ) {
-    val hero = sections.firstOrNull()?.items?.firstOrNull()
+    val heroItems = sections.firstOrNull()?.items.orEmpty()
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(bottom = 24.dp),
@@ -445,28 +536,29 @@ fun HomeScreen(
                 Spacer(Modifier.width(10.dp))
                 Text("CineFlow", fontSize = 24.sp, fontWeight = FontWeight.ExtraBold, color = Cream)
                 Spacer(Modifier.weight(1f))
+                IconButton(onClick = onRefresh) { Icon(Icons.Default.Refresh, "Refresh", tint = Cream) }
                 IconButton(onClick = onSearch) { Icon(Icons.Default.Search, "Search", tint = Cream) }
                 IconButton(onClick = onSettings) { Icon(Icons.Default.Tune, "Settings", tint = Cream) }
             }
         }
-        if (hero != null) {
-            item { HeroBanner(hero, onOpen, onPlay) }
-        } else if (!loading) {
+        if (heroItems.isNotEmpty()) {
+            item { HeroCarousel(heroItems, onOpen, onPlay, bannerAutoSlide) }
+        } else if (!loading && !addonLoading) {
             item {
                 Column(
                     Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 28.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Text("Indian cinema, one place.", color = Cream, fontSize = 24.sp, fontWeight = FontWeight.ExtraBold)
+                    Text("Nothing loaded yet.", color = Cream, fontSize = 24.sp, fontWeight = FontWeight.ExtraBold)
                     Text(
-                        "Add your TMDB API key in Settings → Integrations to load Indian movies and series across Hindi, Bengali and other regional languages. Catalog metadata does not confirm whether a title has a Hindi or Bengali dub.",
+                        addonError ?: "Add your TMDB API key in Settings → Integrations for Indian movies, or install add-ons from Settings → Add-ons.",
                         color = Muted, fontSize = 14.sp, lineHeight = 20.sp
                     )
                     OutlinedButton(onClick = onSettings) { Icon(Icons.Default.Tune, null); Spacer(Modifier.width(8.dp)); Text("Set up catalogue") }
                 }
             }
         }
-        if (loading) {
+        if (loading || addonLoading) {
             item {
                 Column(Modifier.padding(horizontal = 20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Box(Modifier.fillMaxWidth(0.45f).height(22.dp).clip(RoundedCornerShape(8.dp)).background(Panel2))
@@ -478,6 +570,75 @@ fun HomeScreen(
         }
         items(sections) { section ->
             MovieShelf(section.title, section.items, onOpen)
+        }
+    }
+}
+
+@Composable
+fun HeroCarousel(items: List<Movie>, onOpen: (Movie) -> Unit, onPlay: (Movie) -> Unit, autoSlide: Boolean) {
+    val pagerState = rememberPagerState(pageCount = { items.size })
+    if (autoSlide && items.size > 1) {
+        LaunchedEffect(pagerState, items.size) {
+            while (true) {
+                delay(5_000)
+                if (!pagerState.isScrollInProgress) {
+                    pagerState.animateScrollToPage((pagerState.currentPage + 1) % items.size)
+                }
+            }
+        }
+    }
+    Column {
+        HorizontalPager(state = pagerState) { page ->
+            HeroBanner(items[page], onOpen, onPlay)
+        }
+        if (items.size > 1) {
+            val shown = items.size.coerceAtMost(10)
+            Row(
+                Modifier.fillMaxWidth().padding(top = 10.dp),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                repeat(shown) { index ->
+                    val active = (pagerState.currentPage % shown) == index
+                    Box(
+                        Modifier.padding(horizontal = 3.dp)
+                            .size(if (active) 8.dp else 6.dp)
+                            .clip(CircleShape)
+                            .background(if (active) Peach else Muted.copy(alpha = 0.45f))
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun LibraryScreen(
+    continueItems: List<Movie>, historyItems: List<Movie>, watchlistItems: List<Movie>,
+    onOpen: (Movie) -> Unit
+) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(bottom = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(22.dp)
+    ) {
+        item {
+            Text(
+                "Library", color = Cream, fontSize = 26.sp, fontWeight = FontWeight.ExtraBold,
+                modifier = Modifier.statusBarsPadding().padding(horizontal = 20.dp, vertical = 14.dp)
+            )
+        }
+        if (continueItems.isNotEmpty()) item { MovieShelf("Continue watching", continueItems, onOpen) }
+        if (historyItems.isNotEmpty()) item { MovieShelf("Watch history", historyItems, onOpen) }
+        item {
+            if (watchlistItems.isEmpty()) {
+                Text(
+                    "Your watchlist is empty. Save a title with the bookmark button on its details page.",
+                    color = Muted, fontSize = 14.sp, modifier = Modifier.padding(horizontal = 20.dp)
+                )
+            } else {
+                MovieShelf("Watchlist", watchlistItems, onOpen)
+            }
         }
     }
 }
@@ -664,9 +825,13 @@ fun DetailScreen(movie: Movie, canPlay: Boolean, saved: Boolean, onBack: () -> U
 fun SettingsScreen(
     initial: String, initialTmdbKey: String, initialJellyfinServer: String, initialJellyfinUser: String,
     initialJellyfinToken: String, initialJellyfinUserId: String, onBack: () -> Unit,
-    addonSummary: String, addonNames: List<String>, onRetryAddons: () -> Unit,
+    addonSummary: String, addonCards: List<AddonCard>, addonBusy: Boolean,
+    onInstallAddon: (String) -> Unit, onDeleteAddon: (String) -> Unit, onRetryAddons: () -> Unit,
+    bannerAutoSlide: Boolean, onBannerAutoSlideChange: (Boolean) -> Unit,
     onSave: (String, String, String, String, String, String) -> Unit
 ) {
+    var addonUrl by remember { mutableStateOf("") }
+    val uriHandler = LocalUriHandler.current
     var value by remember(initial) { mutableStateOf(initial) }
     var key by remember(initialTmdbKey) { mutableStateOf(initialTmdbKey) }
     var jfServer by remember(initialJellyfinServer) { mutableStateOf(initialJellyfinServer) }
@@ -686,20 +851,76 @@ fun SettingsScreen(
         }
         item { HorizontalDivider(color = Panel2) }
         item { Text("Add-ons", color = Cream, fontSize = 18.sp, fontWeight = FontWeight.Bold) }
-        item { Text("Public add-ons are installed automatically on first launch, so you never have to add them by hand. Tap below to retry any that could not be reached. These are third-party sources — availability, configuration and legality vary by provider.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp) }
+        item { Text("Public add-ons install automatically on first launch. Each card shows its status; use Configure when an add-on needs its own settings. These are third-party sources — availability and legality vary by provider.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp) }
         item { Text(addonSummary, color = Peach, fontSize = 13.sp, fontWeight = FontWeight.SemiBold) }
-        if (addonNames.isNotEmpty()) {
+        if (addonBusy) {
             item {
-                Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                    addonNames.take(60).forEach { name ->
-                        Text("• $name", color = Muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(Modifier.size(18.dp), color = Peach, strokeWidth = 2.dp)
+                    Spacer(Modifier.width(10.dp))
+                    Text("Working on add-ons…", color = Muted, fontSize = 13.sp)
                 }
             }
         }
         item {
-            OutlinedButton(onClick = onRetryAddons, modifier = Modifier.fillMaxWidth().height(48.dp), shape = RoundedCornerShape(14.dp), colors = ButtonDefaults.outlinedButtonColors(contentColor = Peach)) {
-                Icon(Icons.Default.Refresh, null, modifier = Modifier.size(18.dp)); Spacer(Modifier.width(8.dp)); Text("Install / retry add-ons")
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = addonUrl, onValueChange = { addonUrl = it },
+                    modifier = Modifier.weight(1f), label = { Text("Add-on URL") },
+                    placeholder = { Text("https://example.com/manifest.json") },
+                    singleLine = true, shape = RoundedCornerShape(14.dp),
+                    colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Peach, focusedTextColor = Cream, unfocusedTextColor = Cream, cursorColor = Peach)
+                )
+                Button(
+                    onClick = { onInstallAddon(addonUrl.trim()) },
+                    enabled = addonUrl.isNotBlank() && !addonBusy,
+                    colors = ButtonDefaults.buttonColors(containerColor = Peach, contentColor = Ink),
+                    shape = RoundedCornerShape(14.dp)
+                ) { Text("Install") }
+            }
+        }
+        item {
+            OutlinedButton(onClick = onRetryAddons, enabled = !addonBusy, modifier = Modifier.fillMaxWidth().height(48.dp), shape = RoundedCornerShape(14.dp), colors = ButtonDefaults.outlinedButtonColors(contentColor = Peach)) {
+                Icon(Icons.Default.Refresh, null, modifier = Modifier.size(18.dp)); Spacer(Modifier.width(8.dp)); Text("Install / retry all add-ons")
+            }
+        }
+        items(addonCards) { card ->
+            Card(colors = CardDefaults.cardColors(containerColor = Panel), shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(card.label, color = Cream, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                        Spacer(Modifier.width(8.dp))
+                        Surface(
+                            color = when (card.status) { "Installed" -> Peach; "Not installable" -> Color(0xFFE5484D); else -> Panel2 },
+                            shape = RoundedCornerShape(50)
+                        ) {
+                            Text(card.status, Modifier.padding(horizontal = 9.dp, vertical = 3.dp), color = if (card.status == "Installed") Ink else Cream, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                    Text(card.purpose, color = Muted, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Text(card.url, color = Muted.copy(alpha = 0.7f), fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (card.status == "Installed") {
+                            OutlinedButton(onClick = { onDeleteAddon(card.url) }, enabled = !addonBusy, shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFFF6B6B))) { Text("Delete", fontSize = 12.sp) }
+                        } else {
+                            Button(onClick = { onInstallAddon(card.url) }, enabled = !addonBusy, colors = ButtonDefaults.buttonColors(containerColor = Peach, contentColor = Ink), shape = RoundedCornerShape(12.dp)) { Text("Install", fontSize = 12.sp) }
+                        }
+                        if (card.configurable) {
+                            OutlinedButton(onClick = { runCatching { uriHandler.openUri(card.url + "/configure") } }, shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.outlinedButtonColors(contentColor = Cream)) { Text("Configure", fontSize = 12.sp) }
+                        }
+                    }
+                }
+            }
+        }
+        item { HorizontalDivider(color = Panel2) }
+        item { Text("Home banner", color = Cream, fontSize = 18.sp, fontWeight = FontWeight.Bold) }
+        item {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Auto-slide banners", color = Cream, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    Text("Slide the featured banner right to left automatically.", color = Muted, fontSize = 12.sp)
+                }
+                Switch(checked = bannerAutoSlide, onCheckedChange = onBannerAutoSlideChange)
             }
         }
         item { HorizontalDivider(color = Panel2) }

@@ -45,6 +45,10 @@ class AddonCatalogRepository(
     private val _addons = MutableStateFlow<List<AddonRecord>>(emptyList())
     val addons: StateFlow<List<AddonRecord>> = _addons.asStateFlow()
 
+    /** normalized base URL -> "ok" | "failed" for the most recent install attempt. */
+    private val _installResults = MutableStateFlow<Map<String, String>>(emptyMap())
+    val installResults: StateFlow<Map<String, String>> = _installResults.asStateFlow()
+
     /** Human-readable result of the last built-in install pass. */
     private val _installSummary = MutableStateFlow("Add-ons have not been loaded yet.")
     val installSummary: StateFlow<String> = _installSummary.asStateFlow()
@@ -106,6 +110,12 @@ class AddonCatalogRepository(
                 }
             }.awaitAll()
         }
+        val outcome = _installResults.value.toMutableMap()
+        pending.forEachIndexed { index, url ->
+            outcome[url] = if (results.getOrNull(index) is AddonResult.Success) "ok" else "failed"
+        }
+        _installResults.value = outcome
+
         val ok = results.count { it is AddonResult.Success }
         val bad = results.size - ok
         _installSummary.value = "Installed $ok of ${pending.size} add-ons. $bad could not be reached."
@@ -116,11 +126,16 @@ class AddonCatalogRepository(
 
     suspend fun install(url: String): AddonResult<AddonRecord> {
         ensureRestored()
+        val key = AddonClient.normalizeBaseUrl(url)?.toString()?.trimEnd('/') ?: url
         return when (val result = manager.install(url)) {
-            is AddonResult.Failure -> result
+            is AddonResult.Failure -> {
+                _installResults.value = _installResults.value + (key to "failed")
+                result
+            }
             is AddonResult.Success -> {
                 persistManagerState()
                 _addons.value = manager.all()
+                _installResults.value = _installResults.value + (key to "ok")
                 result
             }
         }
@@ -143,6 +158,8 @@ class AddonCatalogRepository(
         if (removed) {
             persistManagerState()
             _addons.value = manager.all()
+            val key = AddonClient.normalizeBaseUrl(baseUrl)?.toString()?.trimEnd('/') ?: baseUrl
+            _installResults.value = _installResults.value - key
             refreshHome()
         }
         return removed
@@ -162,14 +179,14 @@ class AddonCatalogRepository(
             // Bounded so a large add-on list cannot flood the home feed with hundreds of rows.
             val enabled = manager.enabled().take(MAX_HOME_ADDONS)
             if (enabled.isEmpty()) {
-                _homeError.value = "No enabled add-ons to read catalogues from."
+                _homeError.value = "No add-ons are installed yet. Open Settings → Add-ons and tap Install."
                 return
             }
             dispatcher.homeRows(enabled, perAddonCatalogLimit = HOME_CATALOGS_PER_ADDON).collect { result ->
                 _homeRows.value = _homeRows.value + result
             }
             if (_homeRows.value.none { it.error == null && it.items.isNotEmpty() }) {
-                _homeError.value = "No add-on catalogue returned any titles. Check your network or retry from Settings."
+                _homeError.value = "No add-on catalogue returned titles. Your network may block these hosts — open Settings → Add-ons to see which ones installed."
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -205,7 +222,7 @@ class AddonCatalogRepository(
 
     companion object {
         /** How many enabled add-ons may contribute rows to the home feed. */
-        const val MAX_HOME_ADDONS = 12
+        const val MAX_HOME_ADDONS = 14
 
         /** How many catalogues per add-on are shown on the home feed. */
         const val HOME_CATALOGS_PER_ADDON = 2
