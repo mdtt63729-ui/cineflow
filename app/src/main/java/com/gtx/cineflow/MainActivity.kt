@@ -61,7 +61,13 @@ import androidx.media3.ui.PlayerView
 import androidx.compose.ui.viewinterop.AndroidView
 import com.gtx.cineflow.addons.AddonCatalogRepository
 import com.gtx.cineflow.addons.AddonClient
+import com.gtx.cineflow.addons.AddonPlaybackResolver
+import com.gtx.cineflow.addons.AddonResult
+import com.gtx.cineflow.addons.AddonSource
+import com.gtx.cineflow.addons.AddonSourceRanker
+import com.gtx.cineflow.addons.AddonSourceRepository
 import com.gtx.cineflow.addons.BuiltInAddonRegistry
+import com.gtx.cineflow.addons.PlaybackResolution
 import com.gtx.cineflow.addons.CatalogItem
 import coil.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
@@ -289,6 +295,13 @@ fun CineFlowApp() {
         addonSections.forEach { section -> section.items.forEach { knownMovies[it.id] = it } }
     }
 
+    // Catalogue entries keyed by movie id so a tap on Play can resolve the add-on's streams.
+    val addonItems = remember { mutableStateMapOf<String, CatalogItem>() }
+    val addonSourceRepo = remember { AddonSourceRepository(context) }
+    LaunchedEffect(addonRows) {
+        addonRows.forEach { row -> row.items.forEach { addonItems[it.id] = it } }
+    }
+
     val addonCards = remember(installedAddons, addonInstallResults) {
         val byUrl = installedAddons.associateBy {
             AddonClient.normalizeBaseUrl(it.baseUrl)?.toString()?.trimEnd('/') ?: it.baseUrl
@@ -431,22 +444,39 @@ fun CineFlowApp() {
                                 }
                             }
                         },
-                        onRequestUrl = {
+                        onRequestUrls = {
                             val item = state.first!!
-                            val remoteUrl = try {
-                                if (api != null && !item.id.startsWith("sample-") && !item.id.startsWith("tmdb:") && !item.id.startsWith("jellyfin:")) withContext(Dispatchers.IO) { api.stream(item.id).url } else ""
-                            } catch (_: Exception) { "" }
-                            when {
-                                item.id.startsWith("jellyfin:") -> item.streamUrl.takeIf { safeHttps(it) }.orEmpty()
-                                item.id.startsWith("sample-") -> item.streamUrl.takeIf { safeHttps(it) }.orEmpty()
-                                safeHttps(remoteUrl) -> remoteUrl
-                                else -> ""
+                            val urls = mutableListOf<String>()
+                            if (item.id.startsWith("jellyfin:") || item.id.startsWith("sample-")) {
+                                item.streamUrl.takeIf { safeHttps(it) }?.let { urls += it }
                             }
+                            if (urls.isEmpty() && api != null && !item.id.startsWith("sample-") && !item.id.startsWith("tmdb:") && !item.id.startsWith("jellyfin:")) {
+                                runCatching { withContext(Dispatchers.IO) { api.stream(item.id).url } }
+                                    .getOrNull()?.takeIf { safeHttps(it) }?.let { urls += it }
+                            }
+                            if (urls.isEmpty()) {
+                                addonItems[item.id]?.let { catalogItem ->
+                                    val sources = runCatching {
+                                        withContext(Dispatchers.IO) {
+                                            addonSourceRepo.load(catalogItem)
+                                                .filterIsInstance<AddonResult.Success<List<AddonSource>>>()
+                                                .flatMap { it.value }
+                                        }
+                                    }.getOrDefault(emptyList())
+                                    AddonSourceRanker.rank(sources).forEach { source ->
+                                        val resolution = runCatching { AddonPlaybackResolver.resolve(source) }.getOrNull()
+                                        if (resolution is PlaybackResolution.Playable) {
+                                            resolution.item.uri.toString().takeIf { safeHttps(it) }?.let { urls += it }
+                                        }
+                                    }
+                                }
+                            }
+                            urls.distinct()
                         }
                     )
                     state.second != null -> DetailScreen(
                         movie = state.second!!,
-                        canPlay = state.second!!.streamUrl.isNotBlank() || state.second!!.id.startsWith("sample-") || state.second!!.id.startsWith("jellyfin:"),
+                        canPlay = state.second!!.streamUrl.isNotBlank() || state.second!!.id.startsWith("sample-") || state.second!!.id.startsWith("jellyfin:") || addonItems.containsKey(state.second!!.id),
                         saved = watchlist.contains(state.second!!.id),
                         onBack = { current = null },
                         onPlay = { playing = state.second },
@@ -1133,13 +1163,15 @@ fun FullPlayer(
     onProgress: (Movie, Long, Long, Boolean) -> Unit,
     onPlaybackStarted: (Movie) -> Unit,
     onPlaybackStopped: (Movie, Long) -> Unit,
-    onRequestUrl: suspend () -> String
+    onRequestUrls: suspend () -> List<String>
 ) {
     val context = LocalContext.current
     val activity = context as? ComponentActivity
-    var streamUrl by remember(movie.id) { mutableStateOf<String?>(null) }
+    var candidates by remember(movie.id) { mutableStateOf<List<String>>(emptyList()) }
+    var attempt by remember(movie.id) { mutableIntStateOf(0) }
     var failure by remember(movie.id) { mutableStateOf(false) }
     var showControls by remember { mutableStateOf(true) }
+    val streamUrl = candidates.getOrNull(attempt)
 
     DisposableEffect(movie.id) {
         val oldOrientation = activity?.requestedOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
@@ -1147,10 +1179,9 @@ fun FullPlayer(
         onDispose { activity?.requestedOrientation = oldOrientation }
     }
     LaunchedEffect(movie.id) {
-        try {
-            val resolved = onRequestUrl()
-            if (safeHttps(resolved)) streamUrl = resolved else failure = true
-        } catch (_: Exception) { failure = true }
+        candidates = try { onRequestUrls() } catch (_: Exception) { emptyList() }
+        attempt = 0
+        failure = candidates.isEmpty()
     }
     val player = remember(streamUrl) {
         streamUrl?.let { url ->
@@ -1168,7 +1199,10 @@ fun FullPlayer(
                         }
                         if (playbackState == Player.STATE_ENDED) onProgress(movie, currentPosition, duration.coerceAtLeast(0L), true)
                     }
-                    override fun onPlayerError(error: androidx.media3.common.PlaybackException) { failure = true }
+                    override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                        // Fall through to the next ranked source before giving up.
+                        if (attempt + 1 < candidates.size) attempt += 1 else failure = true
+                    }
                 })
             }
         }
@@ -1204,7 +1238,10 @@ fun FullPlayer(
             Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 if (!failure) CircularProgressIndicator(color = Peach)
                 Text(if (failure) "Playback could not start" else "Preparing stream…", color = Cream)
-                if (failure) Text("No valid HTTPS stream was returned. Check your authorized media API.", color = Muted, fontSize = 12.sp)
+                if (failure) Text(
+                    "No playable stream was found. Open the title again, or add/configure an add-on in Settings → Add-ons. Torrent-only sources need a debrid add-on.",
+                    color = Muted, fontSize = 12.sp
+                )
             }
         }
         if (showControls) {
