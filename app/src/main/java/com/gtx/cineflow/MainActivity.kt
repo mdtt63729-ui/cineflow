@@ -67,6 +67,8 @@ import com.gtx.cineflow.addons.AddonSource
 import com.gtx.cineflow.addons.AddonSourceRanker
 import com.gtx.cineflow.addons.AddonSourceRepository
 import com.gtx.cineflow.addons.PlaybackResolution
+import com.gtx.cineflow.addons.extensions.ExtensionRepository
+import com.gtx.cineflow.addons.extensions.ExtensionsScreen
 import com.gtx.cineflow.addons.CatalogItem
 import coil.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
@@ -82,32 +84,32 @@ import retrofit2.http.Query
 import java.net.URI
 
 // Theme palette. Dark is the MovieBox-style default; Light mirrors it for bright rooms.
-private class AppPalette(
+internal class AppPalette(
     val ink: Color, val panel: Color, val panel2: Color,
     val accent: Color, val onAccent: Color, val cream: Color, val muted: Color
 )
 
-private val DarkPalette = AppPalette(
+internal val DarkPalette = AppPalette(
     ink = Color(0xFF070A0F), panel = Color(0xFF121821), panel2 = Color(0xFF1C2530),
     accent = Color(0xFF00E08F), onAccent = Color(0xFF04120C),
     cream = Color(0xFFF3F6F8), muted = Color(0xFF93A1AE)
 )
 
-private val LightPalette = AppPalette(
+internal val LightPalette = AppPalette(
     ink = Color(0xFFF4F6F9), panel = Color(0xFFFFFFFF), panel2 = Color(0xFFE5EAF0),
     accent = Color(0xFF00A86B), onAccent = Color(0xFFFFFFFF),
     cream = Color(0xFF0C1420), muted = Color(0xFF5B6675)
 )
 
-private val appPalette = mutableStateOf(DarkPalette)
+internal val appPalette = mutableStateOf(DarkPalette)
 
-private val Ink: Color get() = appPalette.value.ink
-private val Panel: Color get() = appPalette.value.panel
-private val Panel2: Color get() = appPalette.value.panel2
-private val Peach: Color get() = appPalette.value.accent
-private val OnAccent: Color get() = appPalette.value.onAccent
-private val Cream: Color get() = appPalette.value.cream
-private val Muted: Color get() = appPalette.value.muted
+internal val Ink: Color get() = appPalette.value.ink
+internal val Panel: Color get() = appPalette.value.panel
+internal val Panel2: Color get() = appPalette.value.panel2
+internal val Peach: Color get() = appPalette.value.accent
+internal val OnAccent: Color get() = appPalette.value.onAccent
+internal val Cream: Color get() = appPalette.value.cream
+internal val Muted: Color get() = appPalette.value.muted
 private const val SAMPLE_STREAM = "https://storage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
 
 data class Movie(
@@ -215,6 +217,8 @@ fun CineFlowApp() {
     var query by remember { mutableStateOf("") }
     var results by remember { mutableStateOf(sampleMovies) }
     var settingsOpen by remember { mutableStateOf(false) }
+    var extensionsOpen by remember { mutableStateOf(false) }
+    val extensionRepo = remember { ExtensionRepository(context) }
     var bannerAutoSlide by remember { mutableStateOf(prefs.getBoolean("banner_auto_slide", true)) }
     var apiBase by remember { mutableStateOf(prefs.getString("api_base", "") ?: "") }
     var addonMessage by remember { mutableStateOf<String?>(null) }
@@ -336,8 +340,9 @@ fun CineFlowApp() {
             }
         }
     }
-    BackHandler(enabled = playing != null || current != null || settingsOpen) {
+    BackHandler(enabled = playing != null || current != null || settingsOpen || extensionsOpen) {
         when {
+            extensionsOpen -> extensionsOpen = false
             settingsOpen -> settingsOpen = false
             playing != null -> playing = null
             current != null -> current = null
@@ -353,6 +358,10 @@ fun CineFlowApp() {
         Surface(Modifier.fillMaxSize(), color = Ink) {
             Crossfade(targetState = Triple(playing, current, settingsOpen), animationSpec = tween(220), label = "screen") { state ->
                 when {
+                    extensionsOpen -> ExtensionsScreen(
+                        repo = extensionRepo,
+                        onBack = { extensionsOpen = false }
+                    )
                     state.first != null -> FullPlayer(
                         movie = state.first!!,
                         onBack = { playing = null },
@@ -413,6 +422,7 @@ fun CineFlowApp() {
                     state.third -> SettingsScreen(
                         initial = apiBase,
                         onBack = { settingsOpen = false },
+                        onOpenExtensions = { settingsOpen = false; extensionsOpen = true },
                         addonSummary = addonSummary,
                         addonCards = addonCards,
                         addonBusy = addonBusy,
@@ -898,7 +908,7 @@ fun DetailScreen(movie: Movie, canPlay: Boolean, saved: Boolean, onBack: () -> U
 
 @Composable
 fun SettingsScreen(
-    initial: String, onBack: () -> Unit,
+    initial: String, onBack: () -> Unit, onOpenExtensions: () -> Unit,
     addonSummary: String, addonCards: List<AddonCard>, addonBusy: Boolean, addonMessage: String?,
     onInstallAddon: (String) -> Unit, onDeleteAddon: (String) -> Unit,
     bannerAutoSlide: Boolean, onBannerAutoSlideChange: (Boolean) -> Unit,
@@ -913,6 +923,14 @@ fun SettingsScreen(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back", tint = Cream) }
                 Text("Settings", color = Cream, fontSize = 26.sp, fontWeight = FontWeight.ExtraBold)
+            }
+        }
+        item { HorizontalDivider(color = Panel2) }
+        item { Text("Extensions", color = Cream, fontSize = 18.sp, fontWeight = FontWeight.Bold) }
+        item { Text("Browse CloudStream-style extension repositories and download providers.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp) }
+        item {
+            OutlinedButton(onClick = onOpenExtensions, modifier = Modifier.fillMaxWidth().height(48.dp), shape = RoundedCornerShape(14.dp), colors = ButtonDefaults.outlinedButtonColors(contentColor = Peach)) {
+                Icon(Icons.Default.Extension, null, modifier = Modifier.size(18.dp)); Spacer(Modifier.width(8.dp)); Text("Open Extensions")
             }
         }
         item { HorizontalDivider(color = Panel2) }
