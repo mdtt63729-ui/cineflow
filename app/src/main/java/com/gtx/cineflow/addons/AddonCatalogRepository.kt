@@ -1,27 +1,21 @@
 package com.gtx.cineflow.addons
 
 import android.content.Context
-import com.google.gson.Gson
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.toList
-import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.sync.withPermit
 
 /**
- * P2 application-facing coordinator for addon home catalogs and federated catalog search.
+ * Application-facing coordinator for addon home catalogs and federated catalog search.
  *
- * Each addon request is isolated by ResourceDispatcher. A broken addon therefore contributes
- * an error row/result but does not prevent other enabled addons from returning content.
+ * Nothing is pre-installed: the user adds every add-on themselves through the Add-on URL box.
+ * Each addon request is isolated by ResourceDispatcher, so a broken addon contributes an error
+ * row/result but does not prevent other enabled addons from returning content.
  */
 class AddonCatalogRepository(
     context: Context,
@@ -49,8 +43,7 @@ class AddonCatalogRepository(
     private val _installResults = MutableStateFlow<Map<String, String>>(emptyMap())
     val installResults: StateFlow<Map<String, String>> = _installResults.asStateFlow()
 
-    /** Human-readable result of the last built-in install pass. */
-    private val _installSummary = MutableStateFlow("Add-ons have not been loaded yet.")
+    private val _installSummary = MutableStateFlow("No add-ons added yet.")
     val installSummary: StateFlow<String> = _installSummary.asStateFlow()
 
     private var restored = false
@@ -62,66 +55,18 @@ class AddonCatalogRepository(
             manager.restore(store.addons.first())
             restored = true
         }
-        _addons.value = manager.all()
+        syncSnapshot()
+    }
+
+    private suspend fun syncSnapshot() {
+        val list = manager.all()
+        _addons.value = list
+        _installSummary.value = if (list.isEmpty()) "No add-ons added yet." else "${list.size} add-on(s) installed."
     }
 
     suspend fun installedAddons(): List<AddonRecord> {
         ensureRestored()
         return manager.all()
-    }
-
-    /**
-     * Installs missing public defaults once and persists successful manifests.
-     * Existing user settings and disabled states are preserved; unavailable endpoints are skipped
-     * as failures and can be retried later.
-     *
-     * Manifests are fetched with bounded parallelism so a long list of built-ins does not take
-     * one full timeout per dead endpoint. The manager's write path is mutex-guarded, so parallel
-     * installs cannot corrupt state.
-     */
-    suspend fun installBuiltInsIfMissing(): List<AddonResult<AddonRecord>> {
-        ensureRestored()
-        val installed = manager.all().mapNotNull {
-            AddonClient.normalizeBaseUrl(it.baseUrl)?.toString()?.trimEnd('/')
-        }.toSet()
-        val pending = BuiltInAddonRegistry.addons.mapNotNull { spec ->
-            val normalized = AddonClient.normalizeBaseUrl(spec.baseUrl)?.toString()?.trimEnd('/')
-            if (normalized == null || normalized in installed) null else normalized
-        }.distinct()
-        if (pending.isEmpty()) {
-            _installSummary.value = "All ${BuiltInAddonRegistry.addons.size} built-in add-ons are already installed."
-            _addons.value = manager.all()
-            return emptyList()
-        }
-
-        val semaphore = Semaphore(INSTALL_CONCURRENCY)
-        val results = supervisorScope {
-            pending.map { url ->
-                async(Dispatchers.IO) {
-                    semaphore.withPermit {
-                        try {
-                            manager.install(url)
-                        } catch (cancelled: CancellationException) {
-                            throw cancelled
-                        } catch (error: Exception) {
-                            AddonResult.Failure(AddonError(url, error.message ?: "Could not install built-in add-on."))
-                        }
-                    }
-                }
-            }.awaitAll()
-        }
-        val outcome = _installResults.value.toMutableMap()
-        pending.forEachIndexed { index, url ->
-            outcome[url] = if (results.getOrNull(index) is AddonResult.Success) "ok" else "failed"
-        }
-        _installResults.value = outcome
-
-        val ok = results.count { it is AddonResult.Success }
-        val bad = results.size - ok
-        _installSummary.value = "Installed $ok of ${pending.size} add-ons. $bad could not be reached."
-        _addons.value = manager.all()
-        if (ok > 0) persistManagerState()
-        return results
     }
 
     suspend fun install(url: String): AddonResult<AddonRecord> {
@@ -134,7 +79,7 @@ class AddonCatalogRepository(
             }
             is AddonResult.Success -> {
                 persistManagerState()
-                _addons.value = manager.all()
+                syncSnapshot()
                 _installResults.value = _installResults.value + (key to "ok")
                 result
             }
@@ -146,7 +91,7 @@ class AddonCatalogRepository(
         val changed = manager.setEnabled(baseUrl, enabled)
         if (changed) {
             persistManagerState()
-            _addons.value = manager.all()
+            syncSnapshot()
             refreshHome()
         }
         return changed
@@ -157,7 +102,7 @@ class AddonCatalogRepository(
         val removed = manager.uninstall(baseUrl)
         if (removed) {
             persistManagerState()
-            _addons.value = manager.all()
+            syncSnapshot()
             val key = AddonClient.normalizeBaseUrl(baseUrl)?.toString()?.trimEnd('/') ?: baseUrl
             _installResults.value = _installResults.value - key
             refreshHome()
@@ -179,19 +124,19 @@ class AddonCatalogRepository(
             // Bounded so a large add-on list cannot flood the home feed with hundreds of rows.
             val enabled = manager.enabled().take(MAX_HOME_ADDONS)
             if (enabled.isEmpty()) {
-                _homeError.value = "No add-ons are installed yet. Open Settings → Add-ons and tap Install."
+                _homeError.value = "No add-ons added yet. Open Settings → Add-ons and paste a manifest URL."
                 return
             }
             dispatcher.homeRows(enabled, perAddonCatalogLimit = HOME_CATALOGS_PER_ADDON).collect { result ->
                 _homeRows.value = _homeRows.value + result
             }
             if (_homeRows.value.none { it.error == null && it.items.isNotEmpty() }) {
-                _homeError.value = "No add-on catalogue returned titles. Your network may block these hosts — open Settings → Add-ons to see which ones installed."
+                _homeError.value = "No add-on catalogue returned titles. Check your network or the add-on in Settings → Add-ons."
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {
-            _homeError.value = "Add-on catalogues could not be loaded. Check your network or addon settings."
+            _homeError.value = "Add-on catalogues could not be loaded. Check your network or add-on settings."
         } finally {
             _isLoadingHome.value = false
         }
@@ -226,8 +171,5 @@ class AddonCatalogRepository(
 
         /** How many catalogues per add-on are shown on the home feed. */
         const val HOME_CATALOGS_PER_ADDON = 2
-
-        /** Parallel manifest fetches during first-launch installation. */
-        private const val INSTALL_CONCURRENCY = 6
     }
 }

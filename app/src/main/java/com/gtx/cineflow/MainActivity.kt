@@ -66,7 +66,6 @@ import com.gtx.cineflow.addons.AddonResult
 import com.gtx.cineflow.addons.AddonSource
 import com.gtx.cineflow.addons.AddonSourceRanker
 import com.gtx.cineflow.addons.AddonSourceRepository
-import com.gtx.cineflow.addons.BuiltInAddonRegistry
 import com.gtx.cineflow.addons.PlaybackResolution
 import com.gtx.cineflow.addons.CatalogItem
 import coil.compose.AsyncImage
@@ -218,19 +217,13 @@ fun CineFlowApp() {
     var settingsOpen by remember { mutableStateOf(false) }
     var bannerAutoSlide by remember { mutableStateOf(prefs.getBoolean("banner_auto_slide", true)) }
     var apiBase by remember { mutableStateOf(prefs.getString("api_base", "") ?: "") }
-    var tmdbKey by remember { mutableStateOf(prefs.getString("tmdb_key", "") ?: "") }
-    var jellyfinServer by remember { mutableStateOf(prefs.getString("jellyfin_server", "") ?: "") }
-    var jellyfinUser by remember { mutableStateOf(prefs.getString("jellyfin_user", "") ?: "") }
-    var jellyfinToken by remember { mutableStateOf(prefs.getString("jellyfin_token", "") ?: "") }
-    var jellyfinUserId by remember { mutableStateOf(prefs.getString("jellyfin_user_id", "") ?: "") }
-    val tmdbApi = remember { makeTmdbApi() }
+    var addonMessage by remember { mutableStateOf<String?>(null) }
     val addonCatalog = remember { AddonCatalogRepository(context) }
     val addonRows by addonCatalog.homeRows.collectAsState()
     val installedAddons by addonCatalog.addons.collectAsState()
     val addonSummary by addonCatalog.installSummary.collectAsState()
     val addonLoading by addonCatalog.isLoadingHome.collectAsState()
     val addonError by addonCatalog.homeError.collectAsState()
-    val addonInstallResults by addonCatalog.installResults.collectAsState()
     var addonBusy by remember { mutableStateOf(false) }
     val knownMovies = remember {
         mutableStateMapOf<String, Movie>().apply {
@@ -278,10 +271,7 @@ fun CineFlowApp() {
     LaunchedEffect(apiRevision) {
         // Seed the built-in add-ons once, then load their catalogues for the home feed.
         // Failures stay non-fatal: unreachable add-ons are simply skipped.
-        runCatching {
-            addonCatalog.installBuiltInsIfMissing()
-            addonCatalog.refreshHome()
-        }
+        runCatching { addonCatalog.refreshHome() }
     }
 
     val addonSections = remember(addonRows) {
@@ -302,25 +292,16 @@ fun CineFlowApp() {
         addonRows.forEach { row -> row.items.forEach { addonItems[it.id] = it } }
     }
 
-    val addonCards = remember(installedAddons, addonInstallResults) {
-        val byUrl = installedAddons.associateBy {
-            AddonClient.normalizeBaseUrl(it.baseUrl)?.toString()?.trimEnd('/') ?: it.baseUrl
-        }
-        BuiltInAddonRegistry.addons.map { spec ->
-            val key = AddonClient.normalizeBaseUrl(spec.baseUrl)?.toString()?.trimEnd('/') ?: spec.baseUrl
-            val record = byUrl[key]
-            val status = when {
-                record != null -> "Installed"
-                addonInstallResults[key] == "failed" -> "Not installable"
-                else -> "Not installed"
-            }
+    // Only the add-ons the user added themselves; nothing is pre-installed.
+    val addonCards = remember(installedAddons) {
+        installedAddons.map { record ->
             AddonCard(
-                label = record?.manifest?.name ?: spec.baseUrl.removePrefix("https://").substringBefore('/'),
-                url = key,
-                purpose = spec.purpose,
-                status = status,
-                configurable = record?.manifest?.behaviorHints?.configurable == true ||
-                    record?.manifest?.behaviorHints?.configurationRequired == true,
+                label = record.manifest.name.ifBlank { record.baseUrl },
+                url = record.baseUrl,
+                purpose = if (record.enabled) "Enabled" else "Disabled",
+                status = if (record.enabled) "Installed" else "Disabled",
+                configurable = record.manifest.behaviorHints?.configurable == true ||
+                    record.manifest.behaviorHints?.configurationRequired == true,
             )
         }
     }
@@ -334,38 +315,6 @@ fun CineFlowApp() {
                 if (remote.sections.isNotEmpty()) { sections = remote.sections; remote.sections.flatMap { it.items }.forEach { knownMovies[it.id] = it }; loaded = true }
             } catch (_: Exception) { /* Continue to the next configured source. */ }
         }
-        if (jellyfinServer.isNotBlank() && jellyfinToken.isNotBlank() && jellyfinUserId.isNotBlank()) {
-            try {
-                val jf = withContext(Dispatchers.IO) {
-                    val service = makeJellyfinApi(jellyfinServer)
-                    val libraries = service.views(jellyfinUserId, jellyfinToken).Items
-                    libraries.mapNotNull { library ->
-                        val media = service.items(jellyfinUserId, jellyfinToken, parentId = library.Id).Items
-                            .map { it.toCineFlow(jellyfinServer, jellyfinToken) }
-                        if (media.isEmpty()) null else HomeSection("Jellyfin · ${library.Name}", media)
-                    }
-                }
-                if (jf.isNotEmpty()) { sections = jf + sections.filterNot { it.title.startsWith("Jellyfin ·") }; jf.flatMap { it.items }.forEach { knownMovies[it.id] = it }; loaded = true }
-            } catch (_: Exception) { /* Keep cached and metadata feeds available if the server is offline. */ }
-        }
-        if (!loaded && tmdbKey.isNotBlank()) {
-            try {
-                val key = tmdbKey.trim()
-                val remoteSections = withContext(Dispatchers.IO) {
-                    listOf(
-                        HomeSection(
-                            "Indian movies · Hindi, Bengali & regional",
-                            tmdbApi.indianMovies(key).results.map { it.copy(mediaType = "movie").toMovie() }
-                        ),
-                        HomeSection(
-                            "Indian series · Hindi, Bengali & regional",
-                            tmdbApi.indianTv(key).results.map { it.copy(mediaType = "tv").toMovie() }
-                        )
-                    ).filter { it.items.isNotEmpty() }
-                }
-                if (remoteSections.isNotEmpty()) { sections = remoteSections; remoteSections.flatMap { it.items }.forEach { knownMovies[it.id] = it }; loaded = true }
-            } catch (_: Exception) { /* UI remains usable offline. */ }
-        }
         if (!loaded && sections.isEmpty()) sections = sampleSections()
         loading = false
     }
@@ -375,17 +324,13 @@ fun CineFlowApp() {
             if (query.isBlank()) results = sections.flatMap { it.items }.ifEmpty { sampleMovies }
             else {
                 val remote = try {
-                    if (api != null) withContext(Dispatchers.IO) { api.search(query).items }
-                    else if (tmdbKey.isNotBlank()) withContext(Dispatchers.IO) { tmdbApi.search(tmdbKey.trim(), query).results.filter { it.mediaType != "person" }.map { it.toMovie() } }
-                    else emptyList()
+                    if (api != null) withContext(Dispatchers.IO) { api.search(query).items } else emptyList()
                 } catch (_: Exception) { emptyList() }
-                val localJellyfin = sections.filter { it.title.startsWith("Jellyfin ·") }.flatMap { it.items }
+                val local = sections.flatMap { it.items }
                     .filter { it.title.contains(query, true) || it.overview.contains(query, true) }
-                results = (remote + localJellyfin).distinctBy { it.id }.ifEmpty {
-                    when {
-                        api != null || tmdbKey.isNotBlank() || jellyfinToken.isNotBlank() -> emptyList()
-                        else -> sampleMovies.filter { it.title.contains(query, true) || it.overview.contains(query, true) }
-                    }
+                results = (remote + local).distinctBy { it.id }.ifEmpty {
+                    if (api != null) emptyList()
+                    else sampleMovies.filter { it.title.contains(query, true) || it.overview.contains(query, true) }
                 }
                 results.forEach { knownMovies[it.id] = it }
             }
@@ -414,43 +359,20 @@ fun CineFlowApp() {
                         initialPositionMs = playbackProgress[state.first!!.id]?.positionMs ?: 0L,
                         onProgress = { movie, position, duration, completed ->
                             knownMovies[movie.id] = movie
-                            if (movie.id.startsWith("jellyfin:") && jellyfinToken.isNotBlank()) {
-                                val report = JellyfinPlaybackReport(
-                                    ItemId = movie.id.removePrefix("jellyfin:"),
-                                    PositionTicks = position.coerceAtLeast(0L) * 10_000L
-                                )
-                                scope.launch(Dispatchers.IO) {
-                                    runCatching { makeJellyfinApi(jellyfinServer).playbackProgress(jellyfinToken, report) }
-                                }
-                            }
                             if (completed || (duration > 0L && position >= duration - 15_000L)) playbackProgress.remove(movie.id)
                             else if (position > 0L) playbackProgress[movie.id] = PlaybackProgress(movie.id, position, duration, System.currentTimeMillis())
                             persistPlaybackProgress()
                             prefs.edit().putString("known_movies", com.google.gson.Gson().toJson(knownMovies.values.toList())).apply()
                         },
-                        onPlaybackStarted = { movie ->
-                            if (movie.id.startsWith("jellyfin:") && jellyfinToken.isNotBlank()) {
-                                val report = JellyfinPlaybackReport(ItemId = movie.id.removePrefix("jellyfin:"))
-                                scope.launch(Dispatchers.IO) {
-                                    runCatching { makeJellyfinApi(jellyfinServer).playbackStarted(jellyfinToken, report) }
-                                }
-                            }
-                        },
-                        onPlaybackStopped = { movie, position ->
-                            if (movie.id.startsWith("jellyfin:") && jellyfinToken.isNotBlank()) {
-                                val report = JellyfinPlaybackReport(ItemId = movie.id.removePrefix("jellyfin:"), PositionTicks = position.coerceAtLeast(0L) * 10_000L)
-                                scope.launch(Dispatchers.IO) {
-                                    runCatching { makeJellyfinApi(jellyfinServer).playbackStopped(jellyfinToken, report) }
-                                }
-                            }
-                        },
+                        onPlaybackStarted = { movie -> knownMovies[movie.id] = movie },
+                        onPlaybackStopped = { _, _ -> },
                         onRequestUrls = {
                             val item = state.first!!
                             val urls = mutableListOf<String>()
-                            if (item.id.startsWith("jellyfin:") || item.id.startsWith("sample-")) {
+                            if (item.id.startsWith("sample-")) {
                                 item.streamUrl.takeIf { safeHttps(it) }?.let { urls += it }
                             }
-                            if (urls.isEmpty() && api != null && !item.id.startsWith("sample-") && !item.id.startsWith("tmdb:") && !item.id.startsWith("jellyfin:")) {
+                            if (urls.isEmpty() && api != null && !item.id.startsWith("sample-")) {
                                 runCatching { withContext(Dispatchers.IO) { api.stream(item.id).url } }
                                     .getOrNull()?.takeIf { safeHttps(it) }?.let { urls += it }
                             }
@@ -476,7 +398,7 @@ fun CineFlowApp() {
                     )
                     state.second != null -> DetailScreen(
                         movie = state.second!!,
-                        canPlay = state.second!!.streamUrl.isNotBlank() || state.second!!.id.startsWith("sample-") || state.second!!.id.startsWith("jellyfin:") || addonItems.containsKey(state.second!!.id),
+                        canPlay = state.second!!.streamUrl.isNotBlank() || state.second!!.id.startsWith("sample-") || addonItems.containsKey(state.second!!.id),
                         saved = watchlist.contains(state.second!!.id),
                         onBack = { current = null },
                         onPlay = { playing = state.second },
@@ -489,17 +411,23 @@ fun CineFlowApp() {
                         }
                     )
                     state.third -> SettingsScreen(
-                        initial = apiBase, initialTmdbKey = tmdbKey,
-                        initialJellyfinServer = jellyfinServer, initialJellyfinUser = jellyfinUser,
-                        initialJellyfinToken = jellyfinToken, initialJellyfinUserId = jellyfinUserId,
+                        initial = apiBase,
                         onBack = { settingsOpen = false },
                         addonSummary = addonSummary,
                         addonCards = addonCards,
                         addonBusy = addonBusy,
+                        addonMessage = addonMessage,
                         onInstallAddon = { url ->
                             scope.launch {
                                 addonBusy = true
-                                runCatching { addonCatalog.install(url) }
+                                addonMessage = null
+                                val result = runCatching { addonCatalog.install(url) }.getOrNull()
+                                addonMessage = when (result) {
+                                    null -> "Could not reach that URL."
+                                    is AddonResult.Failure -> "Not installable: ${result.error.message}"
+                                    is AddonResult.Success -> "Installed ${result.value.manifest.name}."
+                                    else -> null
+                                }
                                 runCatching { addonCatalog.refreshHome() }
                                 addonBusy = false
                             }
@@ -509,16 +437,6 @@ fun CineFlowApp() {
                                 addonBusy = true
                                 runCatching { addonCatalog.uninstall(url) }
                                 runCatching { addonCatalog.refreshHome() }
-                                addonBusy = false
-                            }
-                        },
-                        onRetryAddons = {
-                            scope.launch {
-                                addonBusy = true
-                                runCatching {
-                                    addonCatalog.installBuiltInsIfMissing()
-                                    addonCatalog.refreshHome()
-                                }
                                 addonBusy = false
                             }
                         },
@@ -532,16 +450,9 @@ fun CineFlowApp() {
                             themeMode = mode
                             prefs.edit().putString("theme_mode", mode).apply()
                         },
-                        onSave = { value, key, jfServer, jfUser, jfToken, jfUserId ->
+                        onSave = { value ->
                             apiBase = value.trim()
-                            tmdbKey = key.trim()
-                            jellyfinServer = jfServer.trim().trimEnd('/')
-                            jellyfinUser = jfUser.trim()
-                            jellyfinToken = jfToken
-                            jellyfinUserId = jfUserId
-                            prefs.edit().putString("api_base", apiBase).putString("tmdb_key", tmdbKey)
-                                .putString("jellyfin_server", jellyfinServer).putString("jellyfin_user", jellyfinUser)
-                                .putString("jellyfin_token", jellyfinToken).putString("jellyfin_user_id", jellyfinUserId).apply()
+                            prefs.edit().putString("api_base", apiBase).apply()
                             apiRevision++
                             settingsOpen = false
                         }
@@ -987,31 +898,21 @@ fun DetailScreen(movie: Movie, canPlay: Boolean, saved: Boolean, onBack: () -> U
 
 @Composable
 fun SettingsScreen(
-    initial: String, initialTmdbKey: String, initialJellyfinServer: String, initialJellyfinUser: String,
-    initialJellyfinToken: String, initialJellyfinUserId: String, onBack: () -> Unit,
-    addonSummary: String, addonCards: List<AddonCard>, addonBusy: Boolean,
-    onInstallAddon: (String) -> Unit, onDeleteAddon: (String) -> Unit, onRetryAddons: () -> Unit,
+    initial: String, onBack: () -> Unit,
+    addonSummary: String, addonCards: List<AddonCard>, addonBusy: Boolean, addonMessage: String?,
+    onInstallAddon: (String) -> Unit, onDeleteAddon: (String) -> Unit,
     bannerAutoSlide: Boolean, onBannerAutoSlideChange: (Boolean) -> Unit,
     themeMode: String, onThemeModeChange: (String) -> Unit,
-    onSave: (String, String, String, String, String, String) -> Unit
+    onSave: (String) -> Unit
 ) {
     var addonUrl by remember { mutableStateOf("") }
     val uriHandler = LocalUriHandler.current
     var value by remember(initial) { mutableStateOf(initial) }
-    var key by remember(initialTmdbKey) { mutableStateOf(initialTmdbKey) }
-    var jfServer by remember(initialJellyfinServer) { mutableStateOf(initialJellyfinServer) }
-    var jfUser by remember(initialJellyfinUser) { mutableStateOf(initialJellyfinUser) }
-    var jfPassword by remember { mutableStateOf("") }
-    var jfToken by remember(initialJellyfinToken) { mutableStateOf(initialJellyfinToken) }
-    var jfUserId by remember(initialJellyfinUserId) { mutableStateOf(initialJellyfinUserId) }
-    var jfStatus by remember { mutableStateOf(if (initialJellyfinToken.isNotBlank()) "Connected session saved" else "Not connected") }
-    var jfBusy by remember { mutableStateOf(false) }
-    val jfScope = rememberCoroutineScope()
     LazyColumn(Modifier.fillMaxSize().statusBarsPadding().padding(horizontal = 20.dp), contentPadding = PaddingValues(top = 12.dp, bottom = 28.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         item {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back", tint = Cream) }
-                Text("Integrations", color = Cream, fontSize = 26.sp, fontWeight = FontWeight.ExtraBold)
+                Text("Settings", color = Cream, fontSize = 26.sp, fontWeight = FontWeight.ExtraBold)
             }
         }
         item { HorizontalDivider(color = Panel2) }
@@ -1044,10 +945,8 @@ fun SettingsScreen(
                 ) { Text("Install") }
             }
         }
-        item {
-            OutlinedButton(onClick = onRetryAddons, enabled = !addonBusy, modifier = Modifier.fillMaxWidth().height(48.dp), shape = RoundedCornerShape(14.dp), colors = ButtonDefaults.outlinedButtonColors(contentColor = Peach)) {
-                Icon(Icons.Default.Refresh, null, modifier = Modifier.size(18.dp)); Spacer(Modifier.width(8.dp)); Text("Install / retry all add-ons")
-            }
+        addonMessage?.let { message ->
+            item { Text(message, color = Peach, fontSize = 13.sp, fontWeight = FontWeight.SemiBold) }
         }
         items(addonCards) { card ->
             Card(colors = CardDefaults.cardColors(containerColor = Panel), shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()) {
@@ -1103,44 +1002,6 @@ fun SettingsScreen(
             }
         }
         item { HorizontalDivider(color = Panel2) }
-        item { Text("TMDB metadata", color = Cream, fontSize = 18.sp, fontWeight = FontWeight.Bold) }
-        item { Text("Trending, popular movies and TV, posters, and multi-search. Create your own key in your TMDB account settings. Metadata does not include streaming links.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp) }
-        item {
-            OutlinedTextField(value = key, onValueChange = { key = it }, modifier = Modifier.fillMaxWidth(), label = { Text("TMDB API key (v3)") }, singleLine = true, shape = RoundedCornerShape(14.dp), colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Peach, focusedTextColor = Cream, unfocusedTextColor = Cream, cursorColor = Peach))
-        }
-        item { HorizontalDivider(color = Panel2) }
-        item { Text("Jellyfin personal media server", color = Cream, fontSize = 18.sp, fontWeight = FontWeight.Bold) }
-        item { Text("Connect to your own Jellyfin server or one you are authorized to access. Use an HTTPS server URL for remote connections. Your password is used only for sign-in and is not saved; the session token is stored locally on this device.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp) }
-        item { OutlinedTextField(value = jfServer, onValueChange = { jfServer = it }, modifier = Modifier.fillMaxWidth(), label = { Text("Jellyfin server HTTPS URL") }, placeholder = { Text("https://jellyfin.example.com") }, singleLine = true, shape = RoundedCornerShape(14.dp), colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Peach, focusedTextColor = Cream, unfocusedTextColor = Cream, cursorColor = Peach)) }
-        item { OutlinedTextField(value = jfUser, onValueChange = { jfUser = it }, modifier = Modifier.fillMaxWidth(), label = { Text("Username") }, singleLine = true, shape = RoundedCornerShape(14.dp), colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Peach, focusedTextColor = Cream, unfocusedTextColor = Cream, cursorColor = Peach)) }
-        item { OutlinedTextField(value = jfPassword, onValueChange = { jfPassword = it }, modifier = Modifier.fillMaxWidth(), label = { Text("Password (not stored)") }, singleLine = true, visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(), shape = RoundedCornerShape(14.dp), colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Peach, focusedTextColor = Cream, unfocusedTextColor = Cream, cursorColor = Peach)) }
-        item { Text(jfStatus, color = if (jfToken.isNotBlank()) Peach else Muted, fontSize = 12.sp) }
-        item {
-            OutlinedButton(onClick = {
-                jfScope.launch {
-                    jfBusy = true
-                    jfStatus = "Connecting…"
-                    try {
-                        val base = jfServer.trim().trimEnd('/')
-                        if (!safeHttps(base) || jfUser.isBlank() || jfPassword.isBlank()) throw IllegalArgumentException("Enter an HTTPS server URL, username and password.")
-                        val response = withContext(Dispatchers.IO) {
-                            makeJellyfinApi("$base/").login(jellyfinAuthorizationHeader(), JellyfinLoginRequest(jfUser.trim(), jfPassword))
-                        }
-                        if (response.AccessToken.isBlank() || response.User.Id.isBlank()) throw IllegalStateException("Server did not return a valid session.")
-                        jfToken = response.AccessToken
-                        jfUserId = response.User.Id
-                        jfPassword = ""
-                        jfStatus = "Connected as ${response.User.Name.ifBlank { jfUser }} · tap Save settings"
-                    } catch (e: Exception) { jfStatus = "Connection failed: ${e.message?.take(120) ?: "Check server and credentials"}" }
-                    jfBusy = false
-                }
-            }, enabled = !jfBusy, modifier = Modifier.fillMaxWidth().height(50.dp), shape = RoundedCornerShape(14.dp), colors = ButtonDefaults.outlinedButtonColors(contentColor = Peach)) {
-                if (jfBusy) CircularProgressIndicator(Modifier.size(18.dp), color = Peach, strokeWidth = 2.dp) else Icon(Icons.Default.Cloud, null)
-                Spacer(Modifier.width(8.dp)); Text(if (jfBusy) "Connecting…" else "Connect to Jellyfin")
-            }
-        }
-        item { Text("After saving a successful connection, CineFlow loads your Jellyfin libraries on Home. Playback uses your server's stream endpoint; server format and network compatibility may vary.", color = Muted, fontSize = 12.sp, lineHeight = 17.sp) }
-        item { HorizontalDivider(color = Panel2) }
         item { Text("Authorized catalogue backend", color = Cream, fontSize = 18.sp, fontWeight = FontWeight.Bold) }
         item { Text("Optional custom backend for catalogue and playable streams you are authorized to access. Its API contract is documented in README.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp) }
         item {
@@ -1148,7 +1009,7 @@ fun SettingsScreen(
         }
         item { Text("Endpoints: home, search?q=…, detail/{id}, stream/{id}. Keep metadata and stream providers separate; the stream endpoint must return an authorized HTTPS URL.", color = Muted, fontSize = 12.sp, lineHeight = 18.sp) }
         item {
-            Button(onClick = { onSave(value, key, jfServer, jfUser, jfToken, jfUserId) }, modifier = Modifier.fillMaxWidth().height(52.dp), colors = ButtonDefaults.buttonColors(containerColor = Peach, contentColor = OnAccent), shape = RoundedCornerShape(15.dp)) {
+            Button(onClick = { onSave(value) }, modifier = Modifier.fillMaxWidth().height(52.dp), colors = ButtonDefaults.buttonColors(containerColor = Peach, contentColor = OnAccent), shape = RoundedCornerShape(15.dp)) {
                 Text("Save settings", fontWeight = FontWeight.Bold)
             }
         }
